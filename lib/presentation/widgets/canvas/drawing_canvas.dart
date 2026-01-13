@@ -1,27 +1,41 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import '../../../domain/entities/stroke.dart';
 import '../../../domain/entities/stroke_point.dart';
 import '../../../core/services/windows_pointer_service.dart';
+import '../../../core/providers/drawing_state.dart';
 
 /// Drawing Canvas Widget
-/// Phase 0 PoC: Receives touch/pen input and draws on screen
-/// Palm Rejection: Only first pointer is allowed to draw
+/// Supports: S-Pen/finger differentiation, pressure sensitivity,
+/// pen/highlighter/eraser tools, undo/redo, pinch zoom/pan
 class DrawingCanvas extends StatefulWidget {
   final Color strokeColor;
   final double strokeWidth;
   final ToolType toolType;
+  final DrawingTool drawingTool;
   final void Function(List<Stroke>)? onStrokesChanged;
   final bool showDebugOverlay;
+  final List<Stroke>? initialStrokes;
+  final void Function()? onUndo;
+  final void Function()? onRedo;
+  final bool canUndo;
+  final bool canRedo;
 
   const DrawingCanvas({
     super.key,
     this.strokeColor = Colors.black,
     this.strokeWidth = 2.0,
     this.toolType = ToolType.pen,
+    this.drawingTool = DrawingTool.pen,
     this.onStrokesChanged,
     this.showDebugOverlay = true,
+    this.initialStrokes,
+    this.onUndo,
+    this.onRedo,
+    this.canUndo = false,
+    this.canRedo = false,
   });
 
   @override
@@ -29,8 +43,13 @@ class DrawingCanvas extends StatefulWidget {
 }
 
 class DrawingCanvasState extends State<DrawingCanvas> {
-  final List<Stroke> _strokes = [];
+  List<Stroke> _strokes = [];
   Stroke? _currentStroke;
+
+  // Undo/Redo stacks
+  final List<List<Stroke>> _undoStack = [];
+  final List<List<Stroke>> _redoStack = [];
+  static const int _maxHistorySize = 50;
 
   // Debug info
   int _inputCount = 0;
@@ -52,6 +71,20 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   // Windows pointer service for S-Pen detection
   final WindowsPointerService _windowsPointerService = WindowsPointerService.instance;
 
+  // Zoom and Pan (for finger gestures)
+  double _scale = 1.0;
+  Offset _offset = Offset.zero;
+  double _baseScale = 1.0;
+  Offset _baseOffset = Offset.zero;
+  Offset? _lastFocalPoint;
+
+  // Multi-touch tracking for gestures
+  final Map<int, Offset> _activePointers = {};
+  bool _isGesturing = false;
+
+  // Eraser tracking
+  Offset? _lastErasePoint;
+
   @override
   void initState() {
     super.initState();
@@ -60,6 +93,19 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     if (Platform.isWindows) {
       _windowsPointerService.initialize();
     }
+    // Load initial strokes if provided
+    if (widget.initialStrokes != null) {
+      _strokes = List.from(widget.initialStrokes!);
+    }
+  }
+
+  /// Save current state for undo
+  void _saveState() {
+    _undoStack.add(List.from(_strokes.map((s) => s.copyWith())));
+    if (_undoStack.length > _maxHistorySize) {
+      _undoStack.removeAt(0);
+    }
+    _redoStack.clear();
   }
 
   Future<void> _initLogFile() async {
@@ -119,23 +165,37 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // Canvas background (grid paper style)
-        CustomPaint(
-          painter: _GridPainter(),
-          size: Size.infinite,
-        ),
-        // Drawing area
-        Listener(
-          onPointerDown: _onPointerDown,
-          onPointerMove: _onPointerMove,
-          onPointerUp: _onPointerUp,
-          onPointerCancel: _onPointerCancel,
-          child: CustomPaint(
-            painter: _StrokePainter(
-              strokes: _strokes,
-              currentStroke: _currentStroke,
+        // Canvas with transform (zoom/pan)
+        ClipRect(
+          child: Transform(
+            transform: Matrix4.identity()
+              ..translate(_offset.dx, _offset.dy)
+              ..scale(_scale),
+            child: Stack(
+              children: [
+                // Canvas background (grid paper style)
+                CustomPaint(
+                  painter: _GridPainter(),
+                  size: Size.infinite,
+                ),
+                // Drawing area
+                Listener(
+                  onPointerDown: _onPointerDown,
+                  onPointerMove: _onPointerMove,
+                  onPointerUp: _onPointerUp,
+                  onPointerCancel: _onPointerCancel,
+                  child: CustomPaint(
+                    painter: _StrokePainter(
+                      strokes: _strokes,
+                      currentStroke: _currentStroke,
+                      eraserPosition: widget.drawingTool == DrawingTool.eraser ? _lastErasePoint : null,
+                      eraserRadius: widget.strokeWidth / 2,
+                    ),
+                    size: Size.infinite,
+                  ),
+                ),
+              ],
             ),
-            size: Size.infinite,
           ),
         ),
         // Debug overlay (toggleable)
@@ -163,7 +223,11 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                       style: const TextStyle(color: Colors.white, fontSize: 11),
                     ),
                     Text(
-                      'Device: $_lastDeviceKind',
+                      'Device: $_lastDeviceKind | Zoom: ${(_scale * 100).toInt()}%',
+                      style: const TextStyle(color: Colors.white, fontSize: 11),
+                    ),
+                    Text(
+                      'Tool: ${widget.drawingTool.name}',
                       style: const TextStyle(color: Colors.white, fontSize: 11),
                     ),
                     const Text(
@@ -192,8 +256,95 @@ class DrawingCanvasState extends State<DrawingCanvas> {
               ),
             ),
           ),
+        // Zoom controls
+        Positioned(
+          bottom: 16,
+          right: 16,
+          child: Column(
+            children: [
+              _buildZoomButton(Icons.add, () => _zoom(1.2)),
+              const SizedBox(height: 8),
+              _buildZoomButton(Icons.remove, () => _zoom(0.8)),
+              const SizedBox(height: 8),
+              _buildZoomButton(Icons.center_focus_strong, _resetTransform),
+            ],
+          ),
+        ),
       ],
     );
+  }
+
+  Widget _buildZoomButton(IconData icon, VoidCallback onPressed) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: IconButton(
+        icon: Icon(icon, size: 20),
+        onPressed: onPressed,
+        padding: const EdgeInsets.all(8),
+        constraints: const BoxConstraints(),
+      ),
+    );
+  }
+
+  void _zoom(double factor) {
+    setState(() {
+      _scale = (_scale * factor).clamp(0.25, 5.0);
+    });
+  }
+
+  void _resetTransform() {
+    setState(() {
+      _scale = 1.0;
+      _offset = Offset.zero;
+    });
+  }
+
+  /// Check if input is a finger touch (for gesture handling)
+  bool _isFingerTouch(PointerEvent event) {
+    if (event.kind != PointerDeviceKind.touch) return false;
+
+    if (Platform.isWindows && _windowsPointerService.isAvailable) {
+      final recentType = _windowsPointerService.getMostRecentPointerType();
+      return recentType == WindowsPointerType.touch;
+    }
+
+    return true; // Assume touch is finger on non-Windows
+  }
+
+  /// Check if input is a pen/stylus
+  bool _isPenInput(PointerEvent event) {
+    // Flutter detects stylus directly
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus) {
+      return true;
+    }
+
+    // Mouse for development
+    if (event.kind == PointerDeviceKind.mouse) {
+      return true;
+    }
+
+    // Windows touch might be pen (S-Pen)
+    if (event.kind == PointerDeviceKind.touch && Platform.isWindows) {
+      if (_windowsPointerService.isAvailable) {
+        final recentType = _windowsPointerService.getMostRecentPointerType();
+        return recentType == WindowsPointerType.pen;
+      }
+      // Fallback: first pointer is allowed
+      return _activePointerId == null || event.pointer == _activePointerId;
+    }
+
+    return false;
   }
 
   /// Input filtering with Windows native API S-Pen detection
@@ -259,9 +410,36 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     return true;
   }
 
+  /// Transform screen coordinates to canvas coordinates
+  Offset _screenToCanvas(Offset screenPos) {
+    return (screenPos - _offset) / _scale;
+  }
+
   void _onPointerDown(PointerDownEvent event) {
+    final isFingerTouch = _isFingerTouch(event);
     final allowed = _isAllowedInput(event);
     _logPointerEvent('DOWN', event, allowed);
+
+    // Track all finger touches for gestures
+    if (isFingerTouch) {
+      _activePointers[event.pointer] = event.localPosition;
+
+      // If 2+ fingers, start gesture mode
+      if (_activePointers.length >= 2) {
+        _isGesturing = true;
+        _baseScale = _scale;
+        _baseOffset = _offset;
+        _lastFocalPoint = _getGestureFocalPoint();
+        _log('Gesture mode started: ${_activePointers.length} fingers');
+        return;
+      }
+
+      // Single finger touch - might be for gesture, wait for more
+      setState(() {
+        _lastDeviceKind = '${_getDeviceKindName(event.kind)} (gesture)';
+      });
+      return;
+    }
 
     // Ignore new touches while drawing (palm rejection)
     if (_activePointerId != null && event.pointer != _activePointerId) {
@@ -284,12 +462,33 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _activePointerId = event.pointer;
     _log('Pointer activated: ${event.pointer}');
 
-    final point = _createStrokePoint(event, 0);
+    // Handle eraser tool
+    if (widget.drawingTool == DrawingTool.eraser) {
+      _saveState();
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _lastErasePoint = canvasPos;
+      _eraseAt(canvasPos);
+      setState(() {
+        _inputCount++;
+        _lastDeviceKind = 'Eraser';
+      });
+      return;
+    }
+
+    // Create stroke point
+    final canvasPos = _screenToCanvas(event.localPosition);
+    final point = _createStrokePoint(event, 0, canvasPos);
+
+    // Determine color based on tool
+    Color strokeColor = widget.strokeColor;
+    if (widget.drawingTool == DrawingTool.highlighter) {
+      strokeColor = widget.strokeColor.withOpacity(0.4);
+    }
 
     _currentStroke = Stroke(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       toolType: widget.toolType,
-      color: widget.strokeColor,
+      color: strokeColor,
       width: widget.strokeWidth,
       points: [point],
       timestamp: DateTime.now().millisecondsSinceEpoch,
@@ -306,7 +505,88 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     });
   }
 
+  /// Get focal point of active gesture pointers
+  Offset _getGestureFocalPoint() {
+    if (_activePointers.isEmpty) return Offset.zero;
+    Offset sum = Offset.zero;
+    for (final pos in _activePointers.values) {
+      sum += pos;
+    }
+    return sum / _activePointers.length.toDouble();
+  }
+
+  /// Get distance between two gesture pointers (for pinch zoom)
+  double _getGestureSpan() {
+    if (_activePointers.length < 2) return 1.0;
+    final positions = _activePointers.values.toList();
+    return (positions[0] - positions[1]).distance;
+  }
+
+  /// Erase strokes at a point
+  void _eraseAt(Offset point) {
+    final eraserRadius = widget.strokeWidth / 2;
+    final toRemove = <Stroke>[];
+
+    for (final stroke in _strokes) {
+      for (final p in stroke.points) {
+        final distance = (Offset(p.x, p.y) - point).distance;
+        if (distance <= eraserRadius + stroke.width / 2) {
+          toRemove.add(stroke);
+          break;
+        }
+      }
+    }
+
+    if (toRemove.isNotEmpty) {
+      for (final stroke in toRemove) {
+        _strokes.remove(stroke);
+      }
+      widget.onStrokesChanged?.call(_strokes);
+    }
+  }
+
   void _onPointerMove(PointerMoveEvent event) {
+    final isFingerTouch = _isFingerTouch(event);
+
+    // Handle finger gesture (pan/zoom)
+    if (isFingerTouch && _activePointers.containsKey(event.pointer)) {
+      _activePointers[event.pointer] = event.localPosition;
+
+      if (_isGesturing && _activePointers.length >= 2) {
+        final currentFocal = _getGestureFocalPoint();
+        final currentSpan = _getGestureSpan();
+
+        // Initial span for scale calculation
+        if (_lastFocalPoint != null) {
+          // Calculate pan
+          final delta = currentFocal - _lastFocalPoint!;
+
+          // Update offset (pan)
+          _offset = _baseOffset + delta;
+
+          // Update scale (pinch zoom) - compare with initial span
+          // Note: We need to track initial span, for now just do pan
+        }
+
+        _lastFocalPoint = currentFocal;
+        setState(() {});
+        return;
+      }
+
+      // Single finger pan
+      if (_activePointers.length == 1 && _lastFocalPoint != null) {
+        final delta = event.localPosition - _lastFocalPoint!;
+        setState(() {
+          _offset += delta;
+        });
+        _lastFocalPoint = event.localPosition;
+        return;
+      }
+
+      _lastFocalPoint = event.localPosition;
+      return;
+    }
+
     // Ignore non-active pointers (palm rejection)
     if (_activePointerId != null && event.pointer != _activePointerId) {
       return;
@@ -317,6 +597,17 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Log every 10th move (performance optimization)
     if (_inputCount % 10 == 0) {
       _logPointerEvent('MOVE', event, allowed);
+    }
+
+    // Handle eraser
+    if (widget.drawingTool == DrawingTool.eraser && event.pointer == _activePointerId) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _lastErasePoint = canvasPos;
+      _eraseAt(canvasPos);
+      setState(() {
+        _inputCount++;
+      });
+      return;
     }
 
     // Ignore if touch input or no current stroke
@@ -333,7 +624,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       }
     }
 
-    final point = _createStrokePoint(event, velocity);
+    final canvasPos = _screenToCanvas(event.localPosition);
+    final point = _createStrokePoint(event, velocity, canvasPos);
 
     _lastPosition = event.localPosition;
     _lastTimestamp = now;
@@ -348,6 +640,21 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    // Handle finger gesture end
+    if (_activePointers.containsKey(event.pointer)) {
+      _activePointers.remove(event.pointer);
+
+      if (_activePointers.isEmpty) {
+        _isGesturing = false;
+        _lastFocalPoint = null;
+        _log('Gesture mode ended');
+      } else if (_activePointers.length == 1) {
+        // Back to single finger - update base for continued pan
+        _lastFocalPoint = _activePointers.values.first;
+      }
+      return;
+    }
+
     // Ignore non-active pointers
     if (_activePointerId != null && event.pointer != _activePointerId) {
       _log('UP ignored: pointer ${event.pointer} (active: $_activePointerId)');
@@ -355,6 +662,15 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     }
 
     _logPointerEvent('UP', event, true);
+
+    // Handle eraser end
+    if (widget.drawingTool == DrawingTool.eraser) {
+      _activePointerId = null;
+      _lastErasePoint = null;
+      setState(() {});
+      return;
+    }
+
     _log('Stroke complete: ${_currentStroke?.points.length ?? 0} points');
 
     // Release active pointer
@@ -363,6 +679,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     if (_currentStroke == null) return;
 
     if (_currentStroke!.points.length >= 2) {
+      _saveState();
       setState(() {
         _strokes.add(_currentStroke!);
         widget.onStrokesChanged?.call(_strokes);
@@ -375,19 +692,38 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
+    // Remove from gesture tracking
+    _activePointers.remove(event.pointer);
+
     // If active pointer is cancelled, release it
     if (event.pointer == _activePointerId) {
       _activePointerId = null;
     }
+
+    if (_activePointers.isEmpty) {
+      _isGesturing = false;
+      _lastFocalPoint = null;
+    }
+
     _currentStroke = null;
     _lastPosition = null;
     _lastTimestamp = null;
+    _lastErasePoint = null;
     setState(() {});
   }
 
-  StrokePoint _createStrokePoint(PointerEvent event, double velocity) {
-    // For mouse, simulate pressure based on velocity
+  StrokePoint _createStrokePoint(PointerEvent event, double velocity, [Offset? canvasPos]) {
     double pressure = event.pressure;
+
+    // On Windows, use native API pressure for pen input
+    if (Platform.isWindows && _windowsPointerService.isAvailable) {
+      final nativePressure = _windowsPointerService.getMostRecentPressure();
+      if (nativePressure != null && nativePressure > 0) {
+        pressure = nativePressure;
+      }
+    }
+
+    // For mouse, simulate pressure based on velocity
     if (event.kind == PointerDeviceKind.mouse) {
       // Faster velocity = lower pressure simulation
       // Velocity range: 0 ~ 2000 pixels/sec
@@ -395,9 +731,17 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       pressure = 1.0 - (velocity / 3000).clamp(0.0, 0.7);
     }
 
+    // Ensure minimum pressure for visibility
+    if (pressure <= 0) {
+      pressure = 0.5;
+    }
+
+    // Use canvas position if provided, otherwise use screen position
+    final pos = canvasPos ?? _screenToCanvas(event.localPosition);
+
     return StrokePoint(
-      x: event.localPosition.dx,
-      y: event.localPosition.dy,
+      x: pos.dx,
+      y: pos.dy,
       pressure: pressure,
       tilt: event.tilt,
       timestamp: DateTime.now().millisecondsSinceEpoch,
@@ -422,6 +766,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   void clear() {
+    if (_strokes.isEmpty) return;
+    _saveState();
     setState(() {
       _strokes.clear();
       _currentStroke = null;
@@ -431,17 +777,42 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   void undo() {
-    if (_strokes.isEmpty) return;
+    if (_undoStack.isEmpty) return;
+    _redoStack.add(List.from(_strokes.map((s) => s.copyWith())));
     setState(() {
-      _strokes.removeLast();
+      _strokes = _undoStack.removeLast();
     });
     widget.onStrokesChanged?.call(_strokes);
   }
+
+  void redo() {
+    if (_redoStack.isEmpty) return;
+    _undoStack.add(List.from(_strokes.map((s) => s.copyWith())));
+    setState(() {
+      _strokes = _redoStack.removeLast();
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  bool get canUndo => _undoStack.isNotEmpty;
+  bool get canRedo => _redoStack.isNotEmpty;
 
   void toggleDebug() {
     setState(() {
       _showDebug = !_showDebug;
     });
+  }
+
+  /// Get all strokes (for saving)
+  List<Stroke> get strokes => List.from(_strokes);
+
+  /// Load strokes (for loading)
+  void loadStrokes(List<Stroke> strokes) {
+    _saveState();
+    setState(() {
+      _strokes = List.from(strokes);
+    });
+    widget.onStrokesChanged?.call(_strokes);
   }
 }
 
@@ -474,10 +845,14 @@ class _GridPainter extends CustomPainter {
 class _StrokePainter extends CustomPainter {
   final List<Stroke> strokes;
   final Stroke? currentStroke;
+  final Offset? eraserPosition;
+  final double eraserRadius;
 
   _StrokePainter({
     required this.strokes,
     this.currentStroke,
+    this.eraserPosition,
+    this.eraserRadius = 10.0,
   });
 
   @override
@@ -488,6 +863,15 @@ class _StrokePainter extends CustomPainter {
 
     if (currentStroke != null) {
       _drawStroke(canvas, currentStroke!);
+    }
+
+    // Draw eraser cursor
+    if (eraserPosition != null) {
+      final eraserPaint = Paint()
+        ..color = Colors.grey.withOpacity(0.5)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0;
+      canvas.drawCircle(eraserPosition!, eraserRadius, eraserPaint);
     }
   }
 
@@ -580,6 +964,7 @@ class _StrokePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _StrokePainter oldDelegate) {
     return strokes != oldDelegate.strokes ||
-        currentStroke != oldDelegate.currentStroke;
+        currentStroke != oldDelegate.currentStroke ||
+        eraserPosition != oldDelegate.eraserPosition;
   }
 }

@@ -146,6 +146,15 @@ class WindowsPointerService {
     return null;
   }
 
+  /// Get the most recent pen pressure (normalized 0.0 - 1.0)
+  /// Returns null if no pen data available
+  double? getMostRecentPressure() {
+    final info = getMostRecentPointerInfo();
+    if (info == null || info.type != WindowsPointerType.pen) return null;
+    // Windows pen pressure is 0-1024, normalize to 0.0-1.0
+    return (info.pressure / 1024.0).clamp(0.0, 1.0);
+  }
+
   /// Check if the most recent pointer is a pen (S-Pen)
   bool isMostRecentPen() {
     final type = getMostRecentPointerType();

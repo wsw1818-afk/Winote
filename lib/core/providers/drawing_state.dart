@@ -1,0 +1,235 @@
+import 'package:flutter/material.dart';
+import '../../domain/entities/stroke.dart';
+
+/// Tool types available in the drawing canvas
+enum DrawingTool {
+  pen,
+  highlighter,
+  eraser,
+}
+
+/// Drawing state provider for managing canvas state
+class DrawingState extends ChangeNotifier {
+  // Current tool
+  DrawingTool _currentTool = DrawingTool.pen;
+  DrawingTool get currentTool => _currentTool;
+
+  // Pen settings
+  Color _penColor = Colors.black;
+  double _penWidth = 2.0;
+  Color get penColor => _penColor;
+  double get penWidth => _penWidth;
+
+  // Highlighter settings
+  Color _highlighterColor = Colors.yellow.withOpacity(0.5);
+  double _highlighterWidth = 20.0;
+  Color get highlighterColor => _highlighterColor;
+  double get highlighterWidth => _highlighterWidth;
+
+  // Eraser settings
+  double _eraserWidth = 20.0;
+  double get eraserWidth => _eraserWidth;
+
+  // Strokes and history for undo/redo
+  List<Stroke> _strokes = [];
+  final List<List<Stroke>> _undoStack = [];
+  final List<List<Stroke>> _redoStack = [];
+  static const int _maxHistorySize = 50;
+
+  List<Stroke> get strokes => _strokes;
+  bool get canUndo => _undoStack.isNotEmpty;
+  bool get canRedo => _redoStack.isNotEmpty;
+
+  // Canvas transform for zoom/pan
+  double _scale = 1.0;
+  Offset _offset = Offset.zero;
+  double get scale => _scale;
+  Offset get offset => _offset;
+
+  // Predefined colors
+  static const List<Color> presetColors = [
+    Colors.black,
+    Colors.white,
+    Color(0xFF424242), // Dark gray
+    Color(0xFF9E9E9E), // Gray
+    Color(0xFFF44336), // Red
+    Color(0xFFE91E63), // Pink
+    Color(0xFF9C27B0), // Purple
+    Color(0xFF673AB7), // Deep Purple
+    Color(0xFF3F51B5), // Indigo
+    Color(0xFF2196F3), // Blue
+    Color(0xFF03A9F4), // Light Blue
+    Color(0xFF00BCD4), // Cyan
+    Color(0xFF009688), // Teal
+    Color(0xFF4CAF50), // Green
+    Color(0xFF8BC34A), // Light Green
+    Color(0xFFCDDC39), // Lime
+    Color(0xFFFFEB3B), // Yellow
+    Color(0xFFFFC107), // Amber
+    Color(0xFFFF9800), // Orange
+    Color(0xFFFF5722), // Deep Orange
+    Color(0xFF795548), // Brown
+  ];
+
+  // Predefined stroke widths
+  static const List<double> presetWidths = [
+    0.5,
+    1.0,
+    2.0,
+    3.0,
+    5.0,
+    8.0,
+    12.0,
+    20.0,
+  ];
+
+  /// Set current tool
+  void setTool(DrawingTool tool) {
+    _currentTool = tool;
+    notifyListeners();
+  }
+
+  /// Set pen color
+  void setPenColor(Color color) {
+    _penColor = color;
+    notifyListeners();
+  }
+
+  /// Set pen width
+  void setPenWidth(double width) {
+    _penWidth = width.clamp(0.5, 50.0);
+    notifyListeners();
+  }
+
+  /// Set highlighter color
+  void setHighlighterColor(Color color) {
+    _highlighterColor = color.withOpacity(0.5);
+    notifyListeners();
+  }
+
+  /// Set highlighter width
+  void setHighlighterWidth(double width) {
+    _highlighterWidth = width.clamp(5.0, 50.0);
+    notifyListeners();
+  }
+
+  /// Set eraser width
+  void setEraserWidth(double width) {
+    _eraserWidth = width.clamp(5.0, 100.0);
+    notifyListeners();
+  }
+
+  /// Get current color based on tool
+  Color get currentColor {
+    switch (_currentTool) {
+      case DrawingTool.pen:
+        return _penColor;
+      case DrawingTool.highlighter:
+        return _highlighterColor;
+      case DrawingTool.eraser:
+        return Colors.white; // Not used for eraser
+    }
+  }
+
+  /// Get current width based on tool
+  double get currentWidth {
+    switch (_currentTool) {
+      case DrawingTool.pen:
+        return _penWidth;
+      case DrawingTool.highlighter:
+        return _highlighterWidth;
+      case DrawingTool.eraser:
+        return _eraserWidth;
+    }
+  }
+
+  /// Save current state for undo
+  void _saveState() {
+    _undoStack.add(List.from(_strokes));
+    if (_undoStack.length > _maxHistorySize) {
+      _undoStack.removeAt(0);
+    }
+    _redoStack.clear();
+  }
+
+  /// Add a stroke
+  void addStroke(Stroke stroke) {
+    _saveState();
+    _strokes.add(stroke);
+    notifyListeners();
+  }
+
+  /// Set all strokes (used when loading or replacing)
+  void setStrokes(List<Stroke> strokes) {
+    _saveState();
+    _strokes = List.from(strokes);
+    notifyListeners();
+  }
+
+  /// Undo last action
+  void undo() {
+    if (_undoStack.isEmpty) return;
+
+    _redoStack.add(List.from(_strokes));
+    _strokes = _undoStack.removeLast();
+    notifyListeners();
+  }
+
+  /// Redo last undone action
+  void redo() {
+    if (_redoStack.isEmpty) return;
+
+    _undoStack.add(List.from(_strokes));
+    _strokes = _redoStack.removeLast();
+    notifyListeners();
+  }
+
+  /// Clear all strokes
+  void clear() {
+    if (_strokes.isEmpty) return;
+    _saveState();
+    _strokes.clear();
+    notifyListeners();
+  }
+
+  /// Erase strokes at a point
+  void eraseAt(Offset point, double radius) {
+    final toRemove = <Stroke>[];
+
+    for (final stroke in _strokes) {
+      for (final p in stroke.points) {
+        final distance = (Offset(p.x, p.y) - point).distance;
+        if (distance <= radius + stroke.width / 2) {
+          toRemove.add(stroke);
+          break;
+        }
+      }
+    }
+
+    if (toRemove.isNotEmpty) {
+      _saveState();
+      for (final stroke in toRemove) {
+        _strokes.remove(stroke);
+      }
+      notifyListeners();
+    }
+  }
+
+  /// Update canvas transform
+  void setTransform({double? scale, Offset? offset}) {
+    if (scale != null) {
+      _scale = scale.clamp(0.1, 5.0);
+    }
+    if (offset != null) {
+      _offset = offset;
+    }
+    notifyListeners();
+  }
+
+  /// Reset canvas transform
+  void resetTransform() {
+    _scale = 1.0;
+    _offset = Offset.zero;
+    notifyListeners();
+  }
+}
