@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/Users/wsw18/flutter/bin/flutter.bat doctor:*)",
+      "Bash(C:/Users/wsw18/flutter/bin/flutter.bat pub get:*)",
+      "Bash(C:/Users/wsw18/flutter/bin/flutter.bat build:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(cmd /c \"dir C:\\\\flutter\")",
+      "Bash(cmd /c \"dir C:\\\\flutter && dir C:\\\\flutter\\\\bin\")",
+      "Bash(cmd /c \"dir C:\\\\flutter\\\\bin 2>&1\")",
+      "Bash(cmd /c \"echo test && dir C:\\\\flutter\\\\bin\")",
+      "Bash(cmd.exe /c \"dir C:\\\\flutter\\\\bin\")",
+      "Bash(powershell.exe -NoProfile -Command \"[System.IO.Directory]::GetFiles\\(''C:\\\\flutter\\\\bin''\\) | ForEach-Object { Write-Host $_}\")",
+      "Bash(powershell.exe -NoProfile -Command \"[System.IO.Directory]::GetDirectories\\(''C:\\\\flutter''\\) | ForEach-Object { Write-Host $_}\")",
+      "Bash(powershell.exe -NoProfile -Command \"[System.IO.Directory]::Exists\\(''C:\\\\flutter''\\); [System.IO.Directory]::GetFileSystemEntries\\(''C:\\\\flutter''\\).Count\")",
+      "Bash(powershell.exe -NoProfile -Command \"$env:PATH -split '';'' | Where-Object { $_-like ''*flutter*'' }\")",
+      "Bash(powershell.exe -NoProfile -Command:*)",
+      "Bash(cmd /c \"xcopy /E /I /Y \"\"h:\\\\Claude_work\\\\Winote\\\\build\\\\windows\\\\x64\\\\runner\\\\Release\"\" \"\"D:\\\\OneDrive\\\\코드작업\\\\결과물\\\\Winote\"\"\")",
+      "Bash(cmd /c \"h:\\\\Claude_work\\\\Winote\\\\build_windows.bat\")",
+      "Bash(cmd.exe /c \"C:\\\\flutter\\\\bin\\\\flutter.bat build windows\":*)",
+      "Bash(cmd.exe /c \"D:\\\\flutter\\\\bin\\\\flutter.bat build windows\")",
+      "Read(//c/Users/wsw18/Desktop/**)"
+    ]
+  }
+}

@@ -1,0 +1,54 @@
+name: winote
+description: 태블릿 필기 앱 (S펜/스타일러스 최적화)
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 상태 관리
+  flutter_riverpod: ^2.4.0
+
+  # 라우팅
+  go_router: ^12.0.0
+
+  # 데이터베이스
+  drift: ^2.14.0
+  sqlite3_flutter_libs: ^0.5.0
+
+  # 파일 처리
+  path_provider: ^2.1.0
+  path: ^1.8.0
+
+  # PDF
+  syncfusion_flutter_pdfviewer: ^28.1.0
+
+  # 유틸리티
+  uuid: ^4.2.0
+  intl: ^0.18.0
+  collection: ^1.18.0
+
+  # Windows API (FFI)
+  win32: ^5.0.0
+  ffi: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  build_runner: ^2.4.0
+  drift_dev: ^2.14.0
+  mocktail: ^1.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/templates/
+    - assets/icons/

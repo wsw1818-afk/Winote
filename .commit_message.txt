@@ -1,0 +1,1 @@
+✅ S펜/손가락 구분 성공! WM_POINTER API로 PT_PEN/PT_TOUCH 정확히 감지
