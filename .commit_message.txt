@@ -1,1 +1,1 @@
-✅ S펜/손가락 구분 성공! WM_POINTER API로 PT_PEN/PT_TOUCH 정확히 감지
+🐛 올가미 도구 수정: S-Pen이 touch로 감지될 때도 올가미 선택 경로가 표시되도록 수정

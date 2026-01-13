@@ -83,6 +83,7 @@ class NotePage {
 class Note {
   final String id;
   final String title;
+  final String? folderId; // Folder for organizing notes (null = root)
   final List<NotePage> pages;
   final DateTime createdAt;
   final DateTime modifiedAt;
@@ -90,6 +91,7 @@ class Note {
   Note({
     required this.id,
     required this.title,
+    this.folderId,
     required this.pages,
     required this.createdAt,
     required this.modifiedAt,
@@ -121,6 +123,7 @@ class Note {
     return {
       'id': id,
       'title': title,
+      'folderId': folderId,
       'pages': pages.map((p) => p.toJson()).toList(),
       'createdAt': createdAt.toIso8601String(),
       'modifiedAt': modifiedAt.toIso8601String(),
@@ -137,6 +140,7 @@ class Note {
       return Note(
         id: json['id'] as String,
         title: json['title'] as String,
+        folderId: json['folderId'] as String?,
         pages: (json['pages'] as List)
             .map((p) => NotePage.fromJson(p as Map<String, dynamic>))
             .toList(),
@@ -154,6 +158,7 @@ class Note {
       return Note(
         id: json['id'] as String,
         title: json['title'] as String,
+        folderId: json['folderId'] as String?,
         pages: [NotePage(pageNumber: 0, strokes: strokes)],
         createdAt: DateTime.parse(json['createdAt'] as String),
         modifiedAt: DateTime.parse(json['modifiedAt'] as String),
@@ -164,6 +169,8 @@ class Note {
   Note copyWith({
     String? id,
     String? title,
+    String? folderId,
+    bool clearFolder = false,
     List<NotePage>? pages,
     DateTime? createdAt,
     DateTime? modifiedAt,
@@ -171,6 +178,7 @@ class Note {
     return Note(
       id: id ?? this.id,
       title: title ?? this.title,
+      folderId: clearFolder ? null : (folderId ?? this.folderId),
       pages: pages ?? this.pages.map((p) => p.copyWith()).toList(),
       createdAt: createdAt ?? this.createdAt,
       modifiedAt: modifiedAt ?? this.modifiedAt,
@@ -226,6 +234,46 @@ class Note {
       modifiedAt: DateTime.now(),
     );
   }
+}
+
+/// Folder model for organizing notes
+class NoteFolder {
+  final String id;
+  final String name;
+  final int colorValue; // Folder color for visual identification
+  final DateTime createdAt;
+
+  NoteFolder({
+    required this.id,
+    required this.name,
+    this.colorValue = 0xFF2196F3, // Default blue
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'colorValue': colorValue,
+    'createdAt': createdAt.toIso8601String(),
+  };
+
+  factory NoteFolder.fromJson(Map<String, dynamic> json) => NoteFolder(
+    id: json['id'] as String,
+    name: json['name'] as String,
+    colorValue: json['colorValue'] as int? ?? 0xFF2196F3,
+    createdAt: DateTime.parse(json['createdAt'] as String),
+  );
+
+  NoteFolder copyWith({
+    String? id,
+    String? name,
+    int? colorValue,
+  }) => NoteFolder(
+    id: id ?? this.id,
+    name: name ?? this.name,
+    colorValue: colorValue ?? this.colorValue,
+    createdAt: createdAt,
+  );
 }
 
 /// Service for saving and loading notes
@@ -359,5 +407,105 @@ class NoteStorageService {
   /// Update note with strokes (backward compatible - updates page 0)
   Note updateNoteStrokes(Note note, List<Stroke> strokes) {
     return note.updatePageStrokes(0, strokes);
+  }
+
+  // ===== Folder Management =====
+
+  String? _foldersFilePath;
+
+  Future<String> get _foldersPath async {
+    if (_foldersFilePath != null) return _foldersFilePath!;
+    final dir = await notesDirectory;
+    _foldersFilePath = '$dir${Platform.pathSeparator}..${Platform.pathSeparator}folders.json';
+    return _foldersFilePath!;
+  }
+
+  /// List all folders
+  Future<List<NoteFolder>> listFolders() async {
+    try {
+      final path = await _foldersPath;
+      final file = File(path);
+
+      if (!await file.exists()) {
+        return [];
+      }
+
+      final jsonString = await file.readAsString();
+      final jsonList = jsonDecode(jsonString) as List<dynamic>;
+      return jsonList
+          .map((j) => NoteFolder.fromJson(j as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      debugPrint('[NoteStorageService] Error listing folders: $e');
+      return [];
+    }
+  }
+
+  /// Save folders list
+  Future<void> _saveFolders(List<NoteFolder> folders) async {
+    try {
+      final path = await _foldersPath;
+      final file = File(path);
+      final jsonString = jsonEncode(folders.map((f) => f.toJson()).toList());
+      await file.writeAsString(jsonString);
+    } catch (e) {
+      debugPrint('[NoteStorageService] Error saving folders: $e');
+    }
+  }
+
+  /// Create a new folder
+  Future<NoteFolder> createFolder(String name, {int? colorValue}) async {
+    final folders = await listFolders();
+    final folder = NoteFolder(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      name: name,
+      colorValue: colorValue ?? 0xFF2196F3,
+      createdAt: DateTime.now(),
+    );
+    folders.add(folder);
+    await _saveFolders(folders);
+    return folder;
+  }
+
+  /// Update a folder
+  Future<void> updateFolder(NoteFolder folder) async {
+    final folders = await listFolders();
+    final index = folders.indexWhere((f) => f.id == folder.id);
+    if (index >= 0) {
+      folders[index] = folder;
+      await _saveFolders(folders);
+    }
+  }
+
+  /// Delete a folder (notes in folder move to root)
+  Future<void> deleteFolder(String folderId) async {
+    // Move notes to root
+    final notes = await listNotes();
+    for (final note in notes.where((n) => n.folderId == folderId)) {
+      await saveNote(note.copyWith(clearFolder: true));
+    }
+
+    // Remove folder
+    final folders = await listFolders();
+    folders.removeWhere((f) => f.id == folderId);
+    await _saveFolders(folders);
+  }
+
+  /// Get notes in a specific folder (null = root folder)
+  Future<List<Note>> listNotesInFolder(String? folderId) async {
+    final notes = await listNotes();
+    return notes.where((n) => n.folderId == folderId).toList();
+  }
+
+  /// Move note to folder
+  Future<void> moveNoteToFolder(String noteId, String? folderId) async {
+    final note = await loadNote(noteId);
+    if (note != null) {
+      await saveNote(note.copyWith(
+        folderId: folderId,
+        clearFolder: folderId == null,
+        modifiedAt: DateTime.now(),
+      ));
+    }
   }
 }

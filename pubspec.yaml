@@ -32,6 +32,12 @@ dependencies:
   intl: ^0.18.0
   collection: ^1.18.0
 
+  # 이미지 선택
+  image_picker: ^1.0.0
+
+  # URL 실행
+  url_launcher: ^6.2.0
+
   # Windows API (FFI)
   win32: ^5.0.0
   ffi: ^2.1.0

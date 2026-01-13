@@ -13,46 +13,209 @@ class LibraryPage extends ConsumerStatefulWidget {
 class _LibraryPageState extends ConsumerState<LibraryPage> {
   final NoteStorageService _storageService = NoteStorageService.instance;
   List<Note> _notes = [];
+  List<NoteFolder> _folders = [];
+  String? _currentFolderId; // null = root folder
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadNotes();
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
+    setState(() => _isLoading = true);
+    _folders = await _storageService.listFolders();
+    _notes = await _storageService.listNotesInFolder(_currentFolderId);
+    setState(() => _isLoading = false);
   }
 
   Future<void> _loadNotes() async {
-    setState(() => _isLoading = true);
-    _notes = await _storageService.listNotes();
-    setState(() => _isLoading = false);
+    _notes = await _storageService.listNotesInFolder(_currentFolderId);
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
+    final currentFolder = _folders.where((f) => f.id == _currentFolderId).firstOrNull;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('라이브러리'),
+        title: Text(_currentFolderId == null ? '라이브러리' : currentFolder?.name ?? '폴더'),
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.pop(),
+          icon: Icon(_currentFolderId == null ? Icons.arrow_back : Icons.folder_open),
+          onPressed: () {
+            if (_currentFolderId == null) {
+              context.pop();
+            } else {
+              // Go back to root
+              setState(() => _currentFolderId = null);
+              _loadNotes();
+            }
+          },
         ),
         actions: [
           IconButton(
+            icon: const Icon(Icons.create_new_folder),
+            tooltip: '새 폴더',
+            onPressed: _showCreateFolderDialog,
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: '새로고침',
-            onPressed: _loadNotes,
+            onPressed: _loadData,
           ),
         ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _notes.isEmpty
-              ? _buildEmptyState()
-              : _buildNotesList(),
+          : _buildContent(),
       floatingActionButton: FloatingActionButton(
         onPressed: () => context.push('/editor/new'),
         tooltip: '새 노트',
         child: const Icon(Icons.add),
+      ),
+    );
+  }
+
+  Widget _buildContent() {
+    if (_currentFolderId == null) {
+      // Root: show folders + notes
+      if (_folders.isEmpty && _notes.isEmpty) {
+        return _buildEmptyState();
+      }
+      return _buildFoldersAndNotes();
+    } else {
+      // Inside folder: show only notes
+      if (_notes.isEmpty) {
+        return _buildEmptyFolderState();
+      }
+      return _buildNotesList();
+    }
+  }
+
+  Widget _buildFoldersAndNotes() {
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      child: CustomScrollView(
+        slivers: [
+          // Folders section
+          if (_folders.isNotEmpty) ...[
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Text(
+                  '폴더',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey[600],
+                  ),
+                ),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: 1.2,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => _buildFolderCard(_folders[index]),
+                  childCount: _folders.length,
+                ),
+              ),
+            ),
+          ],
+          // Notes section
+          if (_notes.isNotEmpty) ...[
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Text(
+                  '노트',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey[600],
+                  ),
+                ),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.all(16),
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 16,
+                  mainAxisSpacing: 16,
+                  childAspectRatio: 0.85,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => _buildNoteCard(_notes[index]),
+                  childCount: _notes.length,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFolderCard(NoteFolder folder) {
+    return Card(
+      elevation: 1,
+      child: InkWell(
+        onTap: () {
+          setState(() => _currentFolderId = folder.id);
+          _loadNotes();
+        },
+        onLongPress: () => _showFolderOptions(folder),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.folder,
+              size: 40,
+              color: Color(folder.colorValue),
+            ),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Text(
+                folder.name,
+                style: const TextStyle(fontSize: 12),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyFolderState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.folder_open,
+            size: 80,
+            color: Colors.grey[400],
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '폴더가 비어있습니다',
+            style: TextStyle(fontSize: 18, color: Colors.grey[600]),
+          ),
+        ],
       ),
     );
   }
@@ -231,6 +394,14 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.drive_file_move),
+              title: const Text('폴더로 이동'),
+              onTap: () {
+                Navigator.pop(context);
+                _showMoveToFolderDialog(note);
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.delete, color: Colors.red),
               title: const Text('삭제', style: TextStyle(color: Colors.red)),
               onTap: () {
@@ -308,6 +479,220 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
               '삭제',
               style: TextStyle(color: Colors.red),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ===== Folder Management =====
+
+  void _showCreateFolderDialog() {
+    final controller = TextEditingController();
+    int selectedColor = 0xFF2196F3; // Default blue
+
+    final colors = [
+      0xFF2196F3, // Blue
+      0xFF4CAF50, // Green
+      0xFFF44336, // Red
+      0xFFFF9800, // Orange
+      0xFF9C27B0, // Purple
+      0xFF795548, // Brown
+    ];
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('새 폴더'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: '폴더 이름',
+                  border: OutlineInputBorder(),
+                  hintText: '예: 수학, 영어, 과학',
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: colors.map((color) {
+                  final isSelected = selectedColor == color;
+                  return GestureDetector(
+                    onTap: () => setDialogState(() => selectedColor = color),
+                    child: Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: Color(color),
+                        shape: BoxShape.circle,
+                        border: isSelected
+                            ? Border.all(color: Colors.black, width: 3)
+                            : null,
+                      ),
+                      child: isSelected
+                          ? const Icon(Icons.check, color: Colors.white, size: 20)
+                          : null,
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('취소'),
+            ),
+            TextButton(
+              onPressed: () async {
+                if (controller.text.isNotEmpty) {
+                  await _storageService.createFolder(
+                    controller.text,
+                    colorValue: selectedColor,
+                  );
+                  if (mounted) {
+                    Navigator.pop(context);
+                    _loadData();
+                  }
+                }
+              },
+              child: const Text('만들기'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showFolderOptions(NoteFolder folder) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.folder_open),
+              title: const Text('열기'),
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _currentFolderId = folder.id);
+                _loadNotes();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit),
+              title: const Text('이름 변경'),
+              onTap: () {
+                Navigator.pop(context);
+                _showRenameFolderDialog(folder);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete, color: Colors.red),
+              title: const Text('삭제', style: TextStyle(color: Colors.red)),
+              subtitle: const Text('노트는 삭제되지 않습니다'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _storageService.deleteFolder(folder.id);
+                _loadData();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showRenameFolderDialog(NoteFolder folder) {
+    final controller = TextEditingController(text: folder.name);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('폴더 이름 변경'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '폴더 이름',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () async {
+              if (controller.text.isNotEmpty) {
+                await _storageService.updateFolder(
+                  folder.copyWith(name: controller.text),
+                );
+                if (mounted) {
+                  Navigator.pop(context);
+                  _loadData();
+                }
+              }
+            },
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showMoveToFolderDialog(Note note) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('폴더로 이동'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Root folder option
+              ListTile(
+                leading: const Icon(Icons.home),
+                title: const Text('라이브러리 (루트)'),
+                selected: note.folderId == null,
+                onTap: () async {
+                  await _storageService.moveNoteToFolder(note.id, null);
+                  if (mounted) {
+                    Navigator.pop(context);
+                    _loadNotes();
+                  }
+                },
+              ),
+              const Divider(),
+              // Folder list
+              ..._folders.map((folder) => ListTile(
+                leading: Icon(Icons.folder, color: Color(folder.colorValue)),
+                title: Text(folder.name),
+                selected: note.folderId == folder.id,
+                onTap: () async {
+                  await _storageService.moveNoteToFolder(note.id, folder.id);
+                  if (mounted) {
+                    Navigator.pop(context);
+                    _loadNotes();
+                  }
+                },
+              )),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('취소'),
           ),
         ],
       ),

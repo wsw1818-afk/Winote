@@ -1,10 +1,14 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import '../../../domain/entities/stroke.dart';
 import '../../../domain/entities/stroke_point.dart';
+import '../../../domain/entities/canvas_image.dart';
+import '../../../domain/entities/canvas_text.dart';
 import '../../../core/services/windows_pointer_service.dart';
+import '../../../core/services/stroke_smoothing_service.dart';
 import '../../../core/providers/drawing_state.dart';
 
 /// Drawing Canvas Widget
@@ -22,6 +26,11 @@ class DrawingCanvas extends StatefulWidget {
   final void Function()? onRedo;
   final bool canUndo;
   final bool canRedo;
+  final PageTemplate pageTemplate;
+  final List<CanvasImage>? initialImages;
+  final void Function(List<CanvasImage>)? onImagesChanged;
+  final List<CanvasText>? initialTexts;
+  final void Function(List<CanvasText>)? onTextsChanged;
 
   const DrawingCanvas({
     super.key,
@@ -36,6 +45,11 @@ class DrawingCanvas extends StatefulWidget {
     this.onRedo,
     this.canUndo = false,
     this.canRedo = false,
+    this.pageTemplate = PageTemplate.grid,
+    this.initialImages,
+    this.onImagesChanged,
+    this.initialTexts,
+    this.onTextsChanged,
   });
 
   @override
@@ -71,6 +85,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   // Windows pointer service for S-Pen detection
   final WindowsPointerService _windowsPointerService = WindowsPointerService.instance;
 
+  // Stroke smoothing service (필기 보정)
+  final StrokeSmoothingService _smoothingService = StrokeSmoothingService.instance;
+
   // Zoom and Pan (for finger gestures)
   double _scale = 1.0;
   Offset _offset = Offset.zero;
@@ -81,9 +98,49 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   // Multi-touch tracking for gestures
   final Map<int, Offset> _activePointers = {};
   bool _isGesturing = false;
+  double _baseSpan = 1.0; // Initial distance between two fingers for pinch zoom
+
+  // Two-finger tap detection for Undo
+  int? _twoFingerTapStartTime;
+  Offset? _twoFingerTapStartPos1;
+  Offset? _twoFingerTapStartPos2;
+  bool _twoFingerMoved = false;
+  static const int _tapMaxDuration = 300; // ms
+  static const double _tapMaxMovement = 30.0; // pixels
+
+  // Palm rejection: S-Pen drawing state
+  bool _isPenDrawing = false; // True when S-Pen is actively drawing
+  int? _penDrawStartTime; // Time when pen started drawing
+
+  // Auto-scroll when drawing near edge (for zoomed-in state)
+  static const double _edgeScrollMargin = 60.0; // pixels from edge to trigger scroll
+  static const double _edgeScrollSpeed = 8.0; // pixels per frame
+  Size? _canvasSize;
 
   // Eraser tracking
   Offset? _lastErasePoint;
+
+  // Lasso selection
+  List<Offset> _lassoPath = [];
+  Set<String> _selectedStrokeIds = {};
+  bool _isDraggingSelection = false;
+  Offset? _selectionDragStart;
+  Offset _selectionOffset = Offset.zero;
+
+  // Images on canvas
+  List<CanvasImage> _images = [];
+  final Map<String, ui.Image> _loadedImages = {};
+  String? _selectedImageId;
+  bool _isDraggingImage = false;
+  Offset? _imageDragStart;
+  bool _isResizingImage = false;
+  String? _resizeCorner; // 'tl', 'tr', 'bl', 'br'
+
+  // Text boxes on canvas
+  List<CanvasText> _texts = [];
+  String? _selectedTextId;
+  bool _isDraggingText = false;
+  Offset? _textDragStart;
 
   @override
   void initState() {
@@ -96,6 +153,44 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Load initial strokes if provided
     if (widget.initialStrokes != null) {
       _strokes = List.from(widget.initialStrokes!);
+    }
+    // Load initial images if provided
+    if (widget.initialImages != null) {
+      _images = List.from(widget.initialImages!);
+      _loadAllImages();
+    }
+    // Load initial texts if provided
+    if (widget.initialTexts != null) {
+      _texts = List.from(widget.initialTexts!);
+    }
+  }
+
+  /// Load all images from file paths
+  Future<void> _loadAllImages() async {
+    for (final canvasImage in _images) {
+      await _loadImage(canvasImage.imagePath);
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// Load a single image from file path
+  Future<ui.Image?> _loadImage(String path) async {
+    if (_loadedImages.containsKey(path)) {
+      return _loadedImages[path];
+    }
+
+    try {
+      final file = File(path);
+      if (!await file.exists()) return null;
+
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      _loadedImages[path] = frame.image;
+      return frame.image;
+    } catch (e) {
+      debugPrint('[DrawingCanvas] Error loading image: $e');
+      return null;
     }
   }
 
@@ -117,9 +212,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
       _logFile = File(logPath);
 
-      // Initialize log file
+      // Initialize log file (sync to ensure it's created immediately)
       final now = DateTime.now();
-      await _logFile!.writeAsString(
+      _logFile!.writeAsStringSync(
         '=== Winote Input Log ===\n'
         'Start: ${now.toString()}\n'
         'Platform: ${Platform.operatingSystem}\n'
@@ -127,28 +222,62 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         '---\n\n',
       );
 
-      _log('Log file initialized: $logPath');
+      print('[WINOTE] Log file created: $logPath');
     } catch (e) {
-      debugPrint('Log file init failed: $e');
+      print('[WINOTE] Log file init failed: $e');
     }
   }
 
-  Future<void> _log(String message) async {
+  void _log(String message) {
+    if (!_enableVerboseLogging) return;
+
     final timestamp = DateTime.now().toString().substring(11, 23);
-    final logLine = '[$timestamp] $message';
+    final logLine = '[DART $timestamp] $message\n';
 
-    debugPrint(logLine);
-
-    if (_logFile != null) {
-      try {
-        await _logFile!.writeAsString('$logLine\n', mode: FileMode.append);
-      } catch (e) {
-        debugPrint('Log write failed: $e');
-      }
-    }
+    // 파일에 로그 저장 (Release 빌드에서도 확인 가능)
+    _logFile?.writeAsStringSync(logLine, mode: FileMode.append);
   }
+
+  void _perfLog(String event, {int? durationMs, String? inputType, Offset? pos}) {
+    if (!_enablePerformanceLog) return;
+
+    final now = DateTime.now();
+    final timestamp = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}.${now.millisecond.toString().padLeft(3, '0')}';
+
+    final parts = <String>[];
+    parts.add('[DART $timestamp] $event');
+
+    if (durationMs != null) {
+      parts.add('${durationMs}ms');
+    }
+    if (inputType != null) {
+      parts.add(inputType);
+    }
+    if (pos != null) {
+      parts.add('(${pos.dx.toInt()},${pos.dy.toInt()})');
+    }
+    parts.add('strokes:${_strokes.length}');
+    parts.add('pts:${_currentStroke?.points.length ?? 0}');
+    parts.add('offset:(${_offset.dx.toInt()},${_offset.dy.toInt()})');
+    parts.add('scale:${_scale.toStringAsFixed(2)}');
+
+    // 파일에 로그 저장 (Release 빌드에서도 확인 가능)
+    _logFile?.writeAsStringSync('${parts.join(' | ')}\n', mode: FileMode.append);
+  }
+
+  // Enable performance profiling log
+  static const bool _enableVerboseLogging = true;  // 올가미 디버깅용
+  static const bool _enablePerformanceLog = true;
+
+  // Performance tracking
+  int _frameCount = 0;
+  int _lastFrameTime = 0;
+  final List<int> _frameTimes = [];
+  static const int _maxFrameSamples = 60;
 
   void _logPointerEvent(String eventType, PointerEvent event, bool allowed) {
+    if (!_enableVerboseLogging) return;
+
     final info = 'EVENT: $eventType | '
         'id: ${event.pointer} | '
         'kind: ${event.kind.name} | '
@@ -163,38 +292,69 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        _canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
+        return Stack(
       children: [
-        // Canvas with transform (zoom/pan)
-        ClipRect(
-          child: Transform(
-            transform: Matrix4.identity()
-              ..translate(_offset.dx, _offset.dy)
-              ..scale(_scale),
-            child: Stack(
-              children: [
-                // Canvas background (grid paper style)
-                CustomPaint(
-                  painter: _GridPainter(),
-                  size: Size.infinite,
-                ),
-                // Drawing area
-                Listener(
-                  onPointerDown: _onPointerDown,
-                  onPointerMove: _onPointerMove,
-                  onPointerUp: _onPointerUp,
-                  onPointerCancel: _onPointerCancel,
-                  child: CustomPaint(
-                    painter: _StrokePainter(
-                      strokes: _strokes,
-                      currentStroke: _currentStroke,
-                      eraserPosition: widget.drawingTool == DrawingTool.eraser ? _lastErasePoint : null,
-                      eraserRadius: widget.strokeWidth / 2,
-                    ),
+        // Listener OUTSIDE Transform to get screen coordinates
+        Listener(
+          onPointerDown: _onPointerDown,
+          onPointerMove: _onPointerMove,
+          onPointerUp: _onPointerUp,
+          onPointerCancel: _onPointerCancel,
+          behavior: HitTestBehavior.opaque,
+          child: ClipRect(
+            child: Transform(
+              transform: Matrix4.identity()
+                ..translate(_offset.dx, _offset.dy)
+                ..scale(_scale),
+              child: Stack(
+                children: [
+                  // Canvas background (template-based)
+                  CustomPaint(
+                    painter: _TemplatePainter(template: widget.pageTemplate),
                     size: Size.infinite,
                   ),
-                ),
-              ],
+                  // Images layer
+                  RepaintBoundary(
+                    child: CustomPaint(
+                      painter: _ImagePainter(
+                        images: _images,
+                        loadedImages: _loadedImages,
+                        selectedImageId: _selectedImageId,
+                      ),
+                      size: Size.infinite,
+                    ),
+                  ),
+                  // Text layer
+                  RepaintBoundary(
+                    child: CustomPaint(
+                      painter: _TextPainter(
+                        texts: _texts,
+                        selectedTextId: _selectedTextId,
+                      ),
+                      size: Size.infinite,
+                    ),
+                  ),
+                  // Drawing area with RepaintBoundary for performance
+                  RepaintBoundary(
+                    child: CustomPaint(
+                      painter: _StrokePainter(
+                        strokes: _strokes,
+                        currentStroke: _currentStroke,
+                        eraserPosition: widget.drawingTool == DrawingTool.eraser ? _lastErasePoint : null,
+                        eraserRadius: widget.strokeWidth / 2,
+                        lassoPath: _lassoPath,
+                        selectedStrokeIds: _selectedStrokeIds,
+                        selectionOffset: _selectionOffset,
+                        selectionBounds: _getSelectionBounds(),
+                      ),
+                      size: Size.infinite,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -272,6 +432,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         ),
       ],
     );
+      },
+    );
   }
 
   Widget _buildZoomButton(IconData icon, VoidCallback onPressed) {
@@ -298,8 +460,36 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   void _zoom(double factor) {
     setState(() {
-      _scale = (_scale * factor).clamp(0.25, 5.0);
+      _scale = (_scale * factor).clamp(1.0, 1.5);
     });
+  }
+
+  /// Auto-scroll canvas when pen is near screen edge (while zoomed in)
+  void _autoScrollIfNearEdge(Offset screenPos) {
+    if (_scale <= 1.0 || _canvasSize == null) return;
+
+    double dx = 0;
+    double dy = 0;
+
+    // Check horizontal edges
+    if (screenPos.dx < _edgeScrollMargin) {
+      dx = _edgeScrollSpeed; // scroll right (move canvas left in view)
+    } else if (screenPos.dx > _canvasSize!.width - _edgeScrollMargin) {
+      dx = -_edgeScrollSpeed; // scroll left
+    }
+
+    // Check vertical edges
+    if (screenPos.dy < _edgeScrollMargin) {
+      dy = _edgeScrollSpeed; // scroll down
+    } else if (screenPos.dy > _canvasSize!.height - _edgeScrollMargin) {
+      dy = -_edgeScrollSpeed; // scroll up
+    }
+
+    if (dx != 0 || dy != 0) {
+      setState(() {
+        _offset += Offset(dx, dy);
+      });
+    }
   }
 
   void _resetTransform() {
@@ -315,7 +505,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     if (Platform.isWindows && _windowsPointerService.isAvailable) {
       final recentType = _windowsPointerService.getMostRecentPointerType();
-      return recentType == WindowsPointerType.touch;
+      final isTouch = recentType == WindowsPointerType.touch;
+      _perfLog('_isFingerTouch', inputType: isTouch ? 'TOUCH' : 'PEN');
+      return isTouch;
     }
 
     return true; // Assume touch is finger on non-Windows
@@ -382,11 +574,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
       if (recentType != null) {
         if (recentType == WindowsPointerType.pen) {
-          _log('Native API: PEN (S-Pen) detected - ALLOWED');
+          // Only log once per stroke (on pointer down)
           return true;
         }
         if (recentType == WindowsPointerType.touch) {
-          _log('Native API: TOUCH (finger) detected - BLOCKED');
           return false;
         }
       }
@@ -416,25 +607,64 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    final startTime = DateTime.now().millisecondsSinceEpoch;
+
+    // === 올가미 디버그: 항상 현재 도구 상태 로깅 ===
+    final nativeType = _windowsPointerService.getMostRecentPointerType();
     final isFingerTouch = _isFingerTouch(event);
     final allowed = _isAllowedInput(event);
+    _log('=== DOWN START === tool: ${widget.drawingTool}, isLasso: ${widget.drawingTool == DrawingTool.lasso}, isFingerTouch: $isFingerTouch, allowed: $allowed, nativeType: ${nativeType?.name ?? "null"}, eventKind: ${event.kind}');
     _logPointerEvent('DOWN', event, allowed);
 
-    // Track all finger touches for gestures
-    if (isFingerTouch) {
-      _activePointers[event.pointer] = event.localPosition;
+    _perfLog('DOWN start', inputType: nativeType?.name ?? 'unknown', pos: event.localPosition);
 
-      // If 2+ fingers, start gesture mode
+    // 올가미 도구: S-Pen이 touch로 감지되어도 첫 포인터는 올가미로 처리
+    // Windows에서 S-Pen은 종종 touch로 감지되므로, 올가미 도구 선택 시 첫 터치를 허용
+    if (widget.drawingTool == DrawingTool.lasso && _activePointerId == null) {
+      // S-Pen 또는 첫 번째 터치인 경우 올가미 도구 처리로 진행
+      // (아래 올가미 처리 코드로 fall through)
+      _log('=== LASSO TOOL ACTIVE === Allowing first pointer for lasso, isFingerTouch: $isFingerTouch');
+    }
+    // Track all finger touches for gestures (올가미 도구가 아닐 때만)
+    else if (isFingerTouch) {
+      _log('=== FINGER TOUCH DETECTED === Entering pan/gesture mode, NOT reaching lasso handler!');
+      // PALM REJECTION: Ignore finger touches while S-Pen is drawing
+      // or shortly after S-Pen was used (500ms grace period)
+      if (_isPenDrawing) {
+        _perfLog('FINGER IGNORED (pen drawing)', inputType: 'TOUCH', pos: event.localPosition);
+        return;
+      }
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (_penDrawStartTime != null && (now - _penDrawStartTime!) < 500) {
+        _perfLog('FINGER IGNORED (pen grace period)', inputType: 'TOUCH', pos: event.localPosition);
+        return;
+      }
+
+      _activePointers[event.pointer] = event.localPosition;
+      _perfLog('FINGER-PAN start', inputType: 'TOUCH', pos: event.localPosition);
+
+      // If 2+ fingers, start gesture mode (pinch zoom + pan)
       if (_activePointers.length >= 2) {
         _isGesturing = true;
         _baseScale = _scale;
         _baseOffset = _offset;
+        _baseSpan = _getGestureSpan();
         _lastFocalPoint = _getGestureFocalPoint();
-        _log('Gesture mode started: ${_activePointers.length} fingers');
+
+        // Start two-finger tap detection
+        final positions = _activePointers.values.toList();
+        _twoFingerTapStartTime = DateTime.now().millisecondsSinceEpoch;
+        _twoFingerTapStartPos1 = positions[0];
+        _twoFingerTapStartPos2 = positions[1];
+        _twoFingerMoved = false;
+
+        _perfLog('GESTURE-ZOOM start', inputType: 'MULTI-TOUCH');
         return;
       }
 
-      // Single finger touch - might be for gesture, wait for more
+      // Single finger touch - pan mode
+      _lastFocalPoint = event.localPosition;
       setState(() {
         _lastDeviceKind = '${_getDeviceKindName(event.kind)} (gesture)';
       });
@@ -460,7 +690,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     // Activate first pointer
     _activePointerId = event.pointer;
-    _log('Pointer activated: ${event.pointer}');
+    _isPenDrawing = true;
+    _penDrawStartTime = DateTime.now().millisecondsSinceEpoch;
+    _log('Pointer activated: ${event.pointer}, currentTool: ${widget.drawingTool}');
 
     // Handle eraser tool
     if (widget.drawingTool == DrawingTool.eraser) {
@@ -472,6 +704,37 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _inputCount++;
         _lastDeviceKind = 'Eraser';
       });
+      return;
+    }
+
+    // Handle lasso tool
+    if (widget.drawingTool == DrawingTool.lasso) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _log('Lasso DOWN at $canvasPos, pointer: ${event.pointer}, activePointerId: $_activePointerId');
+      _perfLog('LASSO DOWN', inputType: 'PEN', pos: event.localPosition);
+
+      // Check if tapping inside existing selection to drag
+      final bounds = _getSelectionBounds();
+      if (bounds != null && bounds.contains(canvasPos)) {
+        _isDraggingSelection = true;
+        _selectionDragStart = canvasPos;
+        _log('Lasso: Start dragging selection');
+        setState(() {
+          _lastDeviceKind = 'Lasso (drag)';
+        });
+        return;
+      }
+
+      // Start new lasso selection
+      _log('Lasso: Start new selection path at $canvasPos');
+      setState(() {
+        _lassoPath = [canvasPos];
+        _selectedStrokeIds.clear();
+        _selectionOffset = Offset.zero;
+        _inputCount++;
+        _lastDeviceKind = 'Lasso';
+      });
+      _log('Lasso: _lassoPath initialized with ${_lassoPath.length} points');
       return;
     }
 
@@ -497,12 +760,15 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _lastPosition = event.localPosition;
     _lastTimestamp = DateTime.now().millisecondsSinceEpoch;
 
+    final duration = DateTime.now().millisecondsSinceEpoch - startTime;
     setState(() {
       _inputCount++;
       _lastPressure = event.pressure;
       _lastDeviceKind = _getDeviceKindName(event.kind);
       _lastVelocity = 0;
     });
+
+    _perfLog('DOWN complete', durationMs: duration, inputType: 'PEN-DRAW', pos: _screenToCanvas(event.localPosition));
   }
 
   /// Get focal point of active gesture pointers
@@ -546,7 +812,43 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   void _onPointerMove(PointerMoveEvent event) {
+    final moveStartTime = DateTime.now().millisecondsSinceEpoch;
     final isFingerTouch = _isFingerTouch(event);
+
+    // === 올가미 디버그: MOVE 시작 ===
+    if (widget.drawingTool == DrawingTool.lasso && _inputCount % 20 == 0) {
+      _log('=== MOVE === tool: ${widget.drawingTool}, isFingerTouch: $isFingerTouch, activePointerId: $_activePointerId, pointer: ${event.pointer}');
+    }
+
+    // 올가미 도구: activePointerId와 일치하면 먼저 올가미 처리
+    // (S-Pen이 touch로 감지되어도 올가미 경로 그리기 허용)
+    if (widget.drawingTool == DrawingTool.lasso && event.pointer == _activePointerId) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+
+      // Dragging selection
+      if (_isDraggingSelection && _selectionDragStart != null) {
+        setState(() {
+          _selectionOffset += canvasPos - _selectionDragStart!;
+          _selectionDragStart = canvasPos;
+        });
+        return;
+      }
+
+      // Drawing lasso path
+      if (_lassoPath.isNotEmpty) {
+        // Log every 5 points for debugging
+        if (_lassoPath.length % 5 == 0) {
+          _log('Lasso MOVE (early): adding point at $canvasPos, total ${_lassoPath.length + 1} points');
+        }
+        setState(() {
+          _lassoPath.add(canvasPos);
+          _inputCount++;
+        });
+      } else {
+        _log('Lasso MOVE (early): _lassoPath is EMPTY! Cannot add points.');
+      }
+      return;
+    }
 
     // Handle finger gesture (pan/zoom)
     if (isFingerTouch && _activePointers.containsKey(event.pointer)) {
@@ -556,16 +858,33 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         final currentFocal = _getGestureFocalPoint();
         final currentSpan = _getGestureSpan();
 
-        // Initial span for scale calculation
-        if (_lastFocalPoint != null) {
-          // Calculate pan
+        // Check if fingers moved significantly (for tap vs gesture detection)
+        if (_twoFingerTapStartPos1 != null && _twoFingerTapStartPos2 != null) {
+          final positions = _activePointers.values.toList();
+          final move1 = (positions[0] - _twoFingerTapStartPos1!).distance;
+          final move2 = (positions[1] - _twoFingerTapStartPos2!).distance;
+          if (move1 > _tapMaxMovement || move2 > _tapMaxMovement) {
+            _twoFingerMoved = true;
+          }
+        }
+
+        if (_lastFocalPoint != null && _baseSpan > 0) {
+          // Calculate scale factor from pinch gesture
+          final scaleFactor = currentSpan / _baseSpan;
+          final newScale = (_baseScale * scaleFactor).clamp(1.0, 1.5);
+
+          // Calculate pan delta
           final delta = currentFocal - _lastFocalPoint!;
 
-          // Update offset (pan)
-          _offset = _baseOffset + delta;
+          // Update scale and offset together for smooth zoom-pan
+          // Zoom toward focal point
+          final focalCanvasPos = (_lastFocalPoint! - _baseOffset) / _baseScale;
+          final newOffset = currentFocal - focalCanvasPos * newScale;
 
-          // Update scale (pinch zoom) - compare with initial span
-          // Note: We need to track initial span, for now just do pan
+          _scale = newScale;
+          _offset = newOffset;
+
+          _perfLog('PINCH-ZOOM', inputType: 'scale:${_scale.toStringAsFixed(2)}');
         }
 
         _lastFocalPoint = currentFocal;
@@ -580,6 +899,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           _offset += delta;
         });
         _lastFocalPoint = event.localPosition;
+        // Log every 10th move for finger pan
+        if (_inputCount % 10 == 0) {
+          _perfLog('FINGER-PAN', inputType: 'TOUCH', pos: event.localPosition);
+        }
         return;
       }
 
@@ -610,6 +933,42 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
+    // Handle lasso tool
+    if (widget.drawingTool == DrawingTool.lasso) {
+      _log('Lasso MOVE check: pointer=${event.pointer}, activePointerId=$_activePointerId, lassoPath.length=${_lassoPath.length}');
+
+      if (event.pointer != _activePointerId) {
+        _log('Lasso MOVE: pointer mismatch, ignoring');
+        return;
+      }
+
+      final canvasPos = _screenToCanvas(event.localPosition);
+
+      // Dragging selection
+      if (_isDraggingSelection && _selectionDragStart != null) {
+        setState(() {
+          _selectionOffset += canvasPos - _selectionDragStart!;
+          _selectionDragStart = canvasPos;
+        });
+        return;
+      }
+
+      // Drawing lasso path
+      if (_lassoPath.isNotEmpty) {
+        // Log every 5 points for debugging
+        if (_lassoPath.length % 5 == 0) {
+          _log('Lasso MOVE: adding point at $canvasPos, total ${_lassoPath.length + 1} points');
+        }
+        setState(() {
+          _lassoPath.add(canvasPos);
+          _inputCount++;
+        });
+      } else {
+        _log('Lasso MOVE: _lassoPath is EMPTY! Cannot add points.');
+      }
+      return;
+    }
+
     // Ignore if touch input or no current stroke
     if (!allowed || _currentStroke == null) return;
 
@@ -624,25 +983,67 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       }
     }
 
+    // Auto-scroll if near edge while drawing
+    _autoScrollIfNearEdge(event.localPosition);
+
     final canvasPos = _screenToCanvas(event.localPosition);
-    final point = _createStrokePoint(event, velocity, canvasPos);
+    final rawPoint = _createStrokePoint(event, velocity, canvasPos);
+
+    // Apply stroke smoothing (필기 보정)
+    final smoothedPoint = _smoothingService.filterPoint(
+      rawPoint,
+      _currentStroke!.points,
+    );
+
+    // Skip if filtered out (jitter/noise removal)
+    if (smoothedPoint == null) {
+      return;
+    }
 
     _lastPosition = event.localPosition;
     _lastTimestamp = now;
 
+    final setStateStart = DateTime.now().millisecondsSinceEpoch;
     setState(() {
-      _currentStroke = _currentStroke!.copyWithNewPoint(point);
+      _currentStroke = _currentStroke!.copyWithNewPoint(smoothedPoint);
       _inputCount++;
       _lastPressure = event.pressure;
       _lastDeviceKind = _getDeviceKindName(event.kind);
       _lastVelocity = velocity;
     });
+
+    final totalDuration = DateTime.now().millisecondsSinceEpoch - moveStartTime;
+    // Log every 20 moves to avoid log spam
+    if (_inputCount % 20 == 0) {
+      _perfLog('MOVE', durationMs: totalDuration, inputType: 'PEN-DRAW', pos: canvasPos);
+    }
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    final upStartTime = DateTime.now().millisecondsSinceEpoch;
+    final nativeType = _windowsPointerService.getMostRecentPointerType();
+    _perfLog('UP start', inputType: nativeType?.name ?? 'unknown', pos: event.localPosition);
+
     // Handle finger gesture end
     if (_activePointers.containsKey(event.pointer)) {
       _activePointers.remove(event.pointer);
+
+      // Check for two-finger tap (Undo gesture)
+      if (_activePointers.isEmpty && _twoFingerTapStartTime != null) {
+        final tapDuration = DateTime.now().millisecondsSinceEpoch - _twoFingerTapStartTime!;
+
+        if (tapDuration < _tapMaxDuration && !_twoFingerMoved) {
+          // Two-finger tap detected - trigger Undo
+          _perfLog('TWO-FINGER TAP', inputType: 'UNDO');
+          undo();
+        }
+
+        // Reset tap detection
+        _twoFingerTapStartTime = null;
+        _twoFingerTapStartPos1 = null;
+        _twoFingerTapStartPos2 = null;
+        _twoFingerMoved = false;
+      }
 
       if (_activePointers.isEmpty) {
         _isGesturing = false;
@@ -666,8 +1067,47 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Handle eraser end
     if (widget.drawingTool == DrawingTool.eraser) {
       _activePointerId = null;
+      _isPenDrawing = false;
       _lastErasePoint = null;
       setState(() {});
+      return;
+    }
+
+    // Handle lasso end
+    if (widget.drawingTool == DrawingTool.lasso) {
+      _log('Lasso UP: ${_lassoPath.length} points in path');
+      _activePointerId = null;
+      _isPenDrawing = false;
+
+      // Finished dragging - apply the move
+      if (_isDraggingSelection) {
+        _log('Lasso: Apply selection move');
+        _applySelectionMove();
+        _isDraggingSelection = false;
+        _selectionDragStart = null;
+        return;
+      }
+
+      // Finished drawing lasso - select strokes inside
+      if (_lassoPath.length >= 3) {
+        final selectedIds = <String>{};
+        for (final stroke in _strokes) {
+          if (_isStrokeInLasso(stroke, _lassoPath)) {
+            selectedIds.add(stroke.id);
+          }
+        }
+
+        _log('Lasso: Selected ${selectedIds.length} strokes');
+        setState(() {
+          _selectedStrokeIds = selectedIds;
+          // Keep the lasso path visible until next action
+        });
+        _perfLog('LASSO SELECT', inputType: '${selectedIds.length} strokes');
+      } else {
+        // Too short lasso - clear selection
+        _log('Lasso: Path too short (${_lassoPath.length} points), clearing');
+        clearSelection();
+      }
       return;
     }
 
@@ -675,6 +1115,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     // Release active pointer
     _activePointerId = null;
+    _isPenDrawing = false;
 
     if (_currentStroke == null) return;
 
@@ -685,6 +1126,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         widget.onStrokesChanged?.call(_strokes);
       });
     }
+
+    final duration = DateTime.now().millisecondsSinceEpoch - upStartTime;
+    _perfLog('STROKE SAVED', durationMs: duration, inputType: 'PEN');
 
     _currentStroke = null;
     _lastPosition = null;
@@ -797,10 +1241,363 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   bool get canUndo => _undoStack.isNotEmpty;
   bool get canRedo => _redoStack.isNotEmpty;
 
+  /// Get selected strokes
+  List<Stroke> get selectedStrokes =>
+      _strokes.where((s) => _selectedStrokeIds.contains(s.id)).toList();
+
+  /// Clear selection
+  void clearSelection() {
+    setState(() {
+      _selectedStrokeIds.clear();
+      _lassoPath.clear();
+      _isDraggingSelection = false;
+      _selectionDragStart = null;
+      _selectionOffset = Offset.zero;
+    });
+  }
+
+  /// Delete selected strokes
+  void deleteSelection() {
+    if (_selectedStrokeIds.isEmpty) return;
+    _saveState();
+    setState(() {
+      _strokes.removeWhere((s) => _selectedStrokeIds.contains(s.id));
+      _selectedStrokeIds.clear();
+      _lassoPath.clear();
+      _selectionOffset = Offset.zero;
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Copy selected strokes (creates duplicates offset by 20 pixels)
+  void copySelection() {
+    if (_selectedStrokeIds.isEmpty) return;
+    _saveState();
+
+    final selectedList = selectedStrokes;
+    final newStrokes = <Stroke>[];
+    final newIds = <String>{};
+
+    for (final stroke in selectedList) {
+      final newId = '${DateTime.now().millisecondsSinceEpoch}_${newStrokes.length}';
+      final offsetPoints = stroke.points.map((p) => StrokePoint(
+        x: p.x + 20 + _selectionOffset.dx,
+        y: p.y + 20 + _selectionOffset.dy,
+        pressure: p.pressure,
+        tilt: p.tilt,
+        timestamp: p.timestamp,
+      )).toList();
+
+      newStrokes.add(Stroke(
+        id: newId,
+        toolType: stroke.toolType,
+        color: stroke.color,
+        width: stroke.width,
+        points: offsetPoints,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      ));
+      newIds.add(newId);
+    }
+
+    setState(() {
+      _strokes.addAll(newStrokes);
+      _selectedStrokeIds = newIds;
+      _lassoPath.clear();
+      _selectionOffset = Offset.zero;
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Apply movement to selected strokes
+  void _applySelectionMove() {
+    if (_selectedStrokeIds.isEmpty || _selectionOffset == Offset.zero) return;
+    _saveState();
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          final movedPoints = stroke.points.map((p) => StrokePoint(
+            x: p.x + _selectionOffset.dx,
+            y: p.y + _selectionOffset.dy,
+            pressure: p.pressure,
+            tilt: p.tilt,
+            timestamp: p.timestamp,
+          )).toList();
+
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: stroke.color,
+            width: stroke.width,
+            points: movedPoints,
+            timestamp: stroke.timestamp,
+          );
+        }
+      }
+      _selectionOffset = Offset.zero;
+      _lassoPath.clear();
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Check if a point is inside the lasso polygon
+  bool _isPointInLasso(Offset point, List<Offset> lasso) {
+    if (lasso.length < 3) return false;
+
+    int intersections = 0;
+    for (int i = 0; i < lasso.length; i++) {
+      final j = (i + 1) % lasso.length;
+      final p1 = lasso[i];
+      final p2 = lasso[j];
+
+      if ((p1.dy > point.dy) != (p2.dy > point.dy)) {
+        final xIntersect = (p2.dx - p1.dx) * (point.dy - p1.dy) / (p2.dy - p1.dy) + p1.dx;
+        if (point.dx < xIntersect) {
+          intersections++;
+        }
+      }
+    }
+    return intersections % 2 == 1;
+  }
+
+  /// Check if stroke is inside lasso selection
+  bool _isStrokeInLasso(Stroke stroke, List<Offset> lasso) {
+    if (stroke.points.isEmpty) return false;
+
+    // Check if any point of the stroke is inside the lasso
+    for (final point in stroke.points) {
+      if (_isPointInLasso(Offset(point.x, point.y), lasso)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Get bounding rect of selected strokes
+  Rect? _getSelectionBounds() {
+    if (_selectedStrokeIds.isEmpty) return null;
+
+    double minX = double.infinity;
+    double minY = double.infinity;
+    double maxX = double.negativeInfinity;
+    double maxY = double.negativeInfinity;
+
+    for (final stroke in _strokes) {
+      if (!_selectedStrokeIds.contains(stroke.id)) continue;
+
+      for (final point in stroke.points) {
+        final x = point.x + _selectionOffset.dx;
+        final y = point.y + _selectionOffset.dy;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    if (minX == double.infinity) return null;
+    return Rect.fromLTRB(minX - 10, minY - 10, maxX + 10, maxY + 10);
+  }
+
   void toggleDebug() {
     setState(() {
       _showDebug = !_showDebug;
     });
+  }
+
+  // ===== Image Management =====
+
+  /// Get all images
+  List<CanvasImage> get images => List.from(_images);
+
+  /// Add an image to canvas
+  Future<void> addImage(String imagePath, {Offset? position}) async {
+    final image = await _loadImage(imagePath);
+    if (image == null) return;
+
+    // Calculate default size (max 300px, maintain aspect ratio)
+    final aspectRatio = image.width / image.height;
+    double width = math.min(image.width.toDouble(), 300);
+    double height = width / aspectRatio;
+
+    final canvasImage = CanvasImage(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      imagePath: imagePath,
+      position: position ?? const Offset(50, 50),
+      size: Size(width, height),
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    );
+
+    _saveState();
+    setState(() {
+      _images.add(canvasImage);
+      _selectedImageId = canvasImage.id;
+    });
+    widget.onImagesChanged?.call(_images);
+  }
+
+  /// Load images from list (for loading saved notes)
+  void loadImages(List<CanvasImage> images) {
+    _images = List.from(images);
+    _loadAllImages();
+    widget.onImagesChanged?.call(_images);
+  }
+
+  /// Delete selected image
+  void deleteSelectedImage() {
+    if (_selectedImageId == null) return;
+
+    _saveState();
+    setState(() {
+      _images.removeWhere((img) => img.id == _selectedImageId);
+      _selectedImageId = null;
+    });
+    widget.onImagesChanged?.call(_images);
+  }
+
+  /// Clear image selection
+  void clearImageSelection() {
+    setState(() {
+      _selectedImageId = null;
+    });
+  }
+
+  /// Check if point is on a resize handle
+  String? _getResizeHandle(CanvasImage image, Offset point) {
+    const handleSize = 20.0;
+    final bounds = image.bounds;
+
+    final handles = {
+      'tl': bounds.topLeft,
+      'tr': bounds.topRight,
+      'bl': bounds.bottomLeft,
+      'br': bounds.bottomRight,
+    };
+
+    for (final entry in handles.entries) {
+      if ((point - entry.value).distance < handleSize) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  // ===== Text Management =====
+
+  /// Get all texts
+  List<CanvasText> get texts => List.from(_texts);
+
+  /// Add a text box to canvas
+  void addTextBox({Offset? position, String? initialText}) {
+    final text = CanvasText(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      text: initialText ?? '',
+      position: position ?? const Offset(50, 50),
+      fontSize: 16.0,
+      color: Colors.black,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    );
+
+    _saveState();
+    setState(() {
+      _texts.add(text);
+      _selectedTextId = text.id;
+    });
+    widget.onTextsChanged?.call(_texts);
+
+    // Show edit dialog
+    _showTextEditDialog(text);
+  }
+
+  /// Load texts from list (for loading saved notes)
+  void loadTexts(List<CanvasText> texts) {
+    _texts = List.from(texts);
+    widget.onTextsChanged?.call(_texts);
+    setState(() {});
+  }
+
+  /// Edit text content
+  void _showTextEditDialog(CanvasText text) {
+    final controller = TextEditingController(text: text.text);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('텍스트 입력'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 5,
+          decoration: const InputDecoration(
+            hintText: '텍스트를 입력하세요...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              // Delete if empty
+              if (controller.text.isEmpty) {
+                deleteSelectedText();
+              }
+              Navigator.pop(context);
+            },
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () {
+              if (controller.text.isNotEmpty) {
+                _updateTextContent(text.id, controller.text);
+              } else {
+                deleteSelectedText();
+              }
+              Navigator.pop(context);
+            },
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Update text content
+  void _updateTextContent(String textId, String newContent) {
+    _saveState();
+    setState(() {
+      final index = _texts.indexWhere((t) => t.id == textId);
+      if (index >= 0) {
+        _texts[index] = _texts[index].copyWith(text: newContent);
+      }
+    });
+    widget.onTextsChanged?.call(_texts);
+  }
+
+  /// Delete selected text
+  void deleteSelectedText() {
+    if (_selectedTextId == null) return;
+
+    _saveState();
+    setState(() {
+      _texts.removeWhere((t) => t.id == _selectedTextId);
+      _selectedTextId = null;
+    });
+    widget.onTextsChanged?.call(_texts);
+  }
+
+  /// Clear text selection
+  void clearTextSelection() {
+    setState(() {
+      _selectedTextId = null;
+    });
+  }
+
+  /// Get text bounds for hit testing
+  Rect _getTextBounds(CanvasText text) {
+    // Estimate text width based on character count and font size
+    final width = math.max(100.0, text.text.length * text.fontSize * 0.6);
+    final height = text.fontSize * 1.5;
+    return Rect.fromLTWH(text.position.dx, text.position.dy, width, height);
   }
 
   /// Get all strokes (for saving)
@@ -816,53 +1613,190 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 }
 
-/// Grid paper background painter
-class _GridPainter extends CustomPainter {
+/// Template background painter - supports multiple page templates
+class _TemplatePainter extends CustomPainter {
+  final PageTemplate template;
+
+  _TemplatePainter({this.template = PageTemplate.blank});
+
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = Colors.grey.withOpacity(0.15)
+      ..color = Colors.grey.withOpacity(0.2)
       ..strokeWidth = 0.5;
 
-    const gridSize = 25.0;
+    switch (template) {
+      case PageTemplate.blank:
+        // No lines, just blank
+        break;
 
-    // Vertical lines
-    for (double x = 0; x < size.width; x += gridSize) {
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
-    }
+      case PageTemplate.lined:
+        // Horizontal lines only (like notebook)
+        const lineSpacing = 30.0;
+        const marginLeft = 80.0;
 
-    // Horizontal lines
-    for (double y = 0; y < size.height; y += gridSize) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+        // Draw left margin line (red)
+        final marginPaint = Paint()
+          ..color = Colors.red.withOpacity(0.3)
+          ..strokeWidth = 1.0;
+        canvas.drawLine(Offset(marginLeft, 0), Offset(marginLeft, size.height), marginPaint);
+
+        // Draw horizontal lines
+        for (double y = lineSpacing; y < size.height; y += lineSpacing) {
+          canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+        }
+        break;
+
+      case PageTemplate.grid:
+        // Square grid
+        const gridSize = 25.0;
+
+        for (double x = 0; x < size.width; x += gridSize) {
+          canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+        }
+        for (double y = 0; y < size.height; y += gridSize) {
+          canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+        }
+        break;
+
+      case PageTemplate.dotted:
+        // Dot grid
+        const dotSpacing = 25.0;
+        final dotPaint = Paint()
+          ..color = Colors.grey.withOpacity(0.4)
+          ..strokeWidth = 2.0
+          ..strokeCap = StrokeCap.round;
+
+        for (double x = dotSpacing; x < size.width; x += dotSpacing) {
+          for (double y = dotSpacing; y < size.height; y += dotSpacing) {
+            canvas.drawCircle(Offset(x, y), 1.0, dotPaint);
+          }
+        }
+        break;
+
+      case PageTemplate.cornell:
+        // Cornell note-taking format
+        const cueColumnWidth = 150.0;
+        const summaryHeight = 120.0;
+        const lineSpacing = 30.0;
+
+        final sectionPaint = Paint()
+          ..color = Colors.blue.withOpacity(0.3)
+          ..strokeWidth = 2.0;
+
+        // Vertical line for cue column
+        canvas.drawLine(
+          Offset(cueColumnWidth, 0),
+          Offset(cueColumnWidth, size.height - summaryHeight),
+          sectionPaint,
+        );
+
+        // Horizontal line for summary section
+        canvas.drawLine(
+          Offset(0, size.height - summaryHeight),
+          Offset(size.width, size.height - summaryHeight),
+          sectionPaint,
+        );
+
+        // Faint horizontal lines in note-taking area
+        for (double y = lineSpacing; y < size.height - summaryHeight; y += lineSpacing) {
+          canvas.drawLine(
+            Offset(cueColumnWidth + 10, y),
+            Offset(size.width - 10, y),
+            paint,
+          );
+        }
+
+        // Labels
+        final textPainter = TextPainter(
+          textDirection: TextDirection.ltr,
+        );
+
+        // Cue label
+        textPainter.text = TextSpan(
+          text: 'CUE',
+          style: TextStyle(
+            color: Colors.blue.withOpacity(0.4),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        );
+        textPainter.layout();
+        textPainter.paint(canvas, const Offset(10, 10));
+
+        // Notes label
+        textPainter.text = TextSpan(
+          text: 'NOTES',
+          style: TextStyle(
+            color: Colors.blue.withOpacity(0.4),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        );
+        textPainter.layout();
+        textPainter.paint(canvas, Offset(cueColumnWidth + 10, 10));
+
+        // Summary label
+        textPainter.text = TextSpan(
+          text: 'SUMMARY',
+          style: TextStyle(
+            color: Colors.blue.withOpacity(0.4),
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        );
+        textPainter.layout();
+        textPainter.paint(canvas, Offset(10, size.height - summaryHeight + 10));
+        break;
     }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _TemplatePainter oldDelegate) =>
+      template != oldDelegate.template;
 }
 
-/// Stroke renderer (Catmull-Rom spline applied)
+/// Optimized stroke renderer - draws directly without spline interpolation for performance
 class _StrokePainter extends CustomPainter {
   final List<Stroke> strokes;
   final Stroke? currentStroke;
   final Offset? eraserPosition;
   final double eraserRadius;
+  final List<Offset> lassoPath;
+  final Set<String> selectedStrokeIds;
+  final Offset selectionOffset;
+  final Rect? selectionBounds;
 
   _StrokePainter({
     required this.strokes,
     this.currentStroke,
     this.eraserPosition,
     this.eraserRadius = 10.0,
+    this.lassoPath = const [],
+    this.selectedStrokeIds = const {},
+    this.selectionOffset = Offset.zero,
+    this.selectionBounds,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Draw completed strokes (non-selected first)
     for (final stroke in strokes) {
-      _drawStroke(canvas, stroke);
+      if (!selectedStrokeIds.contains(stroke.id)) {
+        _drawStrokeFast(canvas, stroke);
+      }
     }
 
+    // Draw selected strokes with offset
+    for (final stroke in strokes) {
+      if (selectedStrokeIds.contains(stroke.id)) {
+        _drawStrokeFast(canvas, stroke, offset: selectionOffset, highlight: true);
+      }
+    }
+
+    // Draw current stroke being drawn
     if (currentStroke != null) {
-      _drawStroke(canvas, currentStroke!);
+      _drawStrokeFast(canvas, currentStroke!);
     }
 
     // Draw eraser cursor
@@ -873,9 +1807,90 @@ class _StrokePainter extends CustomPainter {
         ..strokeWidth = 2.0;
       canvas.drawCircle(eraserPosition!, eraserRadius, eraserPaint);
     }
+
+    // Draw lasso path
+    if (lassoPath.isNotEmpty) {
+      // Main lasso stroke paint (dashed style effect via multiple segments)
+      final lassoPaint = Paint()
+        ..color = Colors.blue.withOpacity(0.8)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+
+      // White outline for better visibility on dark backgrounds
+      final lassoOutlinePaint = Paint()
+        ..color = Colors.white.withOpacity(0.9)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4.0
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+
+      // Semi-transparent fill
+      final lassoFillPaint = Paint()
+        ..color = Colors.blue.withOpacity(0.08)
+        ..style = PaintingStyle.fill;
+
+      final path = Path();
+      path.moveTo(lassoPath.first.dx, lassoPath.first.dy);
+      for (int i = 1; i < lassoPath.length; i++) {
+        path.lineTo(lassoPath[i].dx, lassoPath[i].dy);
+      }
+
+      // Only close and fill if we have enough points (selection complete)
+      if (lassoPath.length >= 3 && selectedStrokeIds.isNotEmpty) {
+        path.close();
+        canvas.drawPath(path, lassoFillPaint);
+      }
+
+      // Draw white outline first, then blue line on top
+      canvas.drawPath(path, lassoOutlinePaint);
+      canvas.drawPath(path, lassoPaint);
+
+      // Draw start point indicator (circle at first point)
+      if (lassoPath.length >= 2 && selectedStrokeIds.isEmpty) {
+        final startPointPaint = Paint()
+          ..color = Colors.blue
+          ..style = PaintingStyle.fill;
+        canvas.drawCircle(lassoPath.first, 5.0, startPointPaint);
+
+        // Draw current end point
+        final endPointPaint = Paint()
+          ..color = Colors.blue.withOpacity(0.6)
+          ..style = PaintingStyle.fill;
+        canvas.drawCircle(lassoPath.last, 4.0, endPointPaint);
+      }
+    }
+
+    // Draw selection bounding box
+    if (selectionBounds != null && selectedStrokeIds.isNotEmpty) {
+      final boundsPaint = Paint()
+        ..color = Colors.blue.withOpacity(0.8)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5;
+
+      final handlePaint = Paint()
+        ..color = Colors.blue
+        ..style = PaintingStyle.fill;
+
+      canvas.drawRect(selectionBounds!, boundsPaint);
+
+      // Draw corner handles
+      const handleSize = 8.0;
+      final corners = [
+        selectionBounds!.topLeft,
+        selectionBounds!.topRight,
+        selectionBounds!.bottomLeft,
+        selectionBounds!.bottomRight,
+      ];
+      for (final corner in corners) {
+        canvas.drawCircle(corner, handleSize / 2, handlePaint);
+      }
+    }
   }
 
-  void _drawStroke(Canvas canvas, Stroke stroke) {
+  /// Fast stroke drawing - no spline interpolation, just direct lines
+  void _drawStrokeFast(Canvas canvas, Stroke stroke, {Offset offset = Offset.zero, bool highlight = false}) {
     if (stroke.points.isEmpty) return;
 
     final paint = Paint()
@@ -889,82 +1904,199 @@ class _StrokePainter extends CustomPainter {
       final point = stroke.points[0];
       final pressure = point.pressure.clamp(0.1, 1.0);
       paint.strokeWidth = stroke.width * (0.5 + pressure * 0.5);
-      canvas.drawCircle(Offset(point.x, point.y), paint.strokeWidth / 2, paint);
+      canvas.drawCircle(Offset(point.x + offset.dx, point.y + offset.dy), paint.strokeWidth / 2, paint);
       return;
     }
 
-    // Two points: draw line
-    if (stroke.points.length == 2) {
-      final p0 = stroke.points[0];
-      final p1 = stroke.points[1];
-      final avgPressure = ((p0.pressure + p1.pressure) / 2).clamp(0.1, 1.0);
-      paint.strokeWidth = stroke.width * (0.5 + avgPressure * 0.5);
-      canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
-      return;
+    // Use Path for efficient batch drawing
+    final path = Path();
+    final firstPoint = stroke.points.first;
+    path.moveTo(firstPoint.x + offset.dx, firstPoint.y + offset.dy);
+
+    // Calculate average pressure for consistent line width
+    double totalPressure = 0;
+    for (final p in stroke.points) {
+      totalPressure += p.pressure;
     }
+    final avgPressure = (totalPressure / stroke.points.length).clamp(0.1, 1.0);
+    paint.strokeWidth = stroke.width * (0.5 + avgPressure * 0.5);
 
-    // 3+ points: Catmull-Rom spline for smooth curves
-    _drawCatmullRomSpline(canvas, stroke, paint);
-  }
+    // Draw quadratic bezier curves for smoothness (simpler than Catmull-Rom)
+    for (int i = 1; i < stroke.points.length; i++) {
+      final p0 = stroke.points[i - 1];
+      final p1 = stroke.points[i];
 
-  void _drawCatmullRomSpline(Canvas canvas, Stroke stroke, Paint paint) {
-    final points = stroke.points;
-
-    for (int i = 0; i < points.length - 1; i++) {
-      // 4 points needed for Catmull-Rom
-      final p0 = i > 0 ? points[i - 1] : points[i];
-      final p1 = points[i];
-      final p2 = points[i + 1];
-      final p3 = i + 2 < points.length ? points[i + 2] : points[i + 1];
-
-      // Pressure-based thickness
-      final pressure = p1.pressure.clamp(0.1, 1.0);
-      paint.strokeWidth = stroke.width * (0.5 + pressure * 0.5);
-
-      // Split segment for smoothness
-      const segments = 8;
-      Offset? prevPoint;
-
-      for (int j = 0; j <= segments; j++) {
-        final t = j / segments;
-        final point = _catmullRom(
-          Offset(p0.x, p0.y),
-          Offset(p1.x, p1.y),
-          Offset(p2.x, p2.y),
-          Offset(p3.x, p3.y),
-          t,
-        );
-
-        if (prevPoint != null) {
-          canvas.drawLine(prevPoint, point, paint);
-        }
-        prevPoint = point;
+      if (i < stroke.points.length - 1) {
+        // Use quadratic bezier with midpoint for smooth curves
+        final p2 = stroke.points[i + 1];
+        final midX = (p1.x + p2.x) / 2 + offset.dx;
+        final midY = (p1.y + p2.y) / 2 + offset.dy;
+        path.quadraticBezierTo(p1.x + offset.dx, p1.y + offset.dy, midX, midY);
+      } else {
+        // Last point: just draw line
+        path.lineTo(p1.x + offset.dx, p1.y + offset.dy);
       }
     }
-  }
 
-  /// Catmull-Rom spline interpolation
-  Offset _catmullRom(Offset p0, Offset p1, Offset p2, Offset p3, double t) {
-    final t2 = t * t;
-    final t3 = t2 * t;
+    // Draw highlight glow for selected strokes
+    if (highlight) {
+      final glowPaint = Paint()
+        ..color = Colors.blue.withOpacity(0.3)
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = paint.strokeWidth + 6;
+      canvas.drawPath(path, glowPaint);
+    }
 
-    final x = 0.5 * ((2 * p1.dx) +
-        (-p0.dx + p2.dx) * t +
-        (2 * p0.dx - 5 * p1.dx + 4 * p2.dx - p3.dx) * t2 +
-        (-p0.dx + 3 * p1.dx - 3 * p2.dx + p3.dx) * t3);
-
-    final y = 0.5 * ((2 * p1.dy) +
-        (-p0.dy + p2.dy) * t +
-        (2 * p0.dy - 5 * p1.dy + 4 * p2.dy - p3.dy) * t2 +
-        (-p0.dy + 3 * p1.dy - 3 * p2.dy + p3.dy) * t3);
-
-    return Offset(x, y);
+    canvas.drawPath(path, paint);
   }
 
   @override
   bool shouldRepaint(covariant _StrokePainter oldDelegate) {
-    return strokes != oldDelegate.strokes ||
-        currentStroke != oldDelegate.currentStroke ||
-        eraserPosition != oldDelegate.eraserPosition;
+    // Only repaint if strokes actually changed
+    if (currentStroke != oldDelegate.currentStroke) return true;
+    if (eraserPosition != oldDelegate.eraserPosition) return true;
+    if (strokes.length != oldDelegate.strokes.length) return true;
+    // Reference equality check for completed strokes (they don't change)
+    if (!identical(strokes, oldDelegate.strokes)) return true;
+    // Lasso/selection changes
+    if (lassoPath.length != oldDelegate.lassoPath.length) return true;
+    if (selectedStrokeIds.length != oldDelegate.selectedStrokeIds.length) return true;
+    if (selectionOffset != oldDelegate.selectionOffset) return true;
+    if (selectionBounds != oldDelegate.selectionBounds) return true;
+    return false;
+  }
+}
+
+/// Image painter for rendering images on canvas
+class _ImagePainter extends CustomPainter {
+  final List<CanvasImage> images;
+  final Map<String, ui.Image> loadedImages;
+  final String? selectedImageId;
+
+  _ImagePainter({
+    required this.images,
+    required this.loadedImages,
+    this.selectedImageId,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final canvasImage in images) {
+      final image = loadedImages[canvasImage.imagePath];
+      if (image == null) continue;
+
+      final isSelected = canvasImage.id == selectedImageId;
+      final bounds = canvasImage.bounds;
+
+      // Draw the image
+      final srcRect = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
+      canvas.drawImageRect(image, srcRect, bounds, Paint());
+
+      // Draw selection border if selected
+      if (isSelected) {
+        final borderPaint = Paint()
+          ..color = Colors.blue
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.0;
+        canvas.drawRect(bounds, borderPaint);
+
+        // Draw resize handles
+        final handlePaint = Paint()
+          ..color = Colors.blue
+          ..style = PaintingStyle.fill;
+        final handleBorderPaint = Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.fill;
+
+        const handleSize = 10.0;
+        final corners = [bounds.topLeft, bounds.topRight, bounds.bottomLeft, bounds.bottomRight];
+        for (final corner in corners) {
+          canvas.drawCircle(corner, handleSize / 2 + 2, handleBorderPaint);
+          canvas.drawCircle(corner, handleSize / 2, handlePaint);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ImagePainter oldDelegate) {
+    if (images.length != oldDelegate.images.length) return true;
+    if (selectedImageId != oldDelegate.selectedImageId) return true;
+    if (loadedImages.length != oldDelegate.loadedImages.length) return true;
+    return false;
+  }
+}
+
+/// Text painter for rendering text boxes on canvas
+class _TextPainter extends CustomPainter {
+  final List<CanvasText> texts;
+  final String? selectedTextId;
+
+  _TextPainter({
+    required this.texts,
+    this.selectedTextId,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final canvasText in texts) {
+      final isSelected = canvasText.id == selectedTextId;
+
+      // Create text style
+      final textStyle = TextStyle(
+        fontSize: canvasText.fontSize,
+        color: canvasText.color,
+        fontWeight: canvasText.isBold ? FontWeight.bold : FontWeight.normal,
+        fontStyle: canvasText.isItalic ? FontStyle.italic : FontStyle.normal,
+      );
+
+      // Create text painter
+      final textPainter = TextPainter(
+        text: TextSpan(text: canvasText.text, style: textStyle),
+        textDirection: TextDirection.ltr,
+        maxLines: null,
+      );
+      textPainter.layout(maxWidth: 500);
+
+      // Draw text
+      textPainter.paint(canvas, canvasText.position);
+
+      // Draw selection border if selected
+      if (isSelected) {
+        final bounds = Rect.fromLTWH(
+          canvasText.position.dx - 4,
+          canvasText.position.dy - 4,
+          textPainter.width + 8,
+          textPainter.height + 8,
+        );
+
+        final borderPaint = Paint()
+          ..color = Colors.blue
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.0;
+        canvas.drawRect(bounds, borderPaint);
+
+        // Draw grab handle
+        final handlePaint = Paint()
+          ..color = Colors.blue
+          ..style = PaintingStyle.fill;
+        canvas.drawCircle(bounds.topLeft, 6, handlePaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TextPainter oldDelegate) {
+    if (texts.length != oldDelegate.texts.length) return true;
+    if (selectedTextId != oldDelegate.selectedTextId) return true;
+    // Check if any text content changed
+    for (int i = 0; i < texts.length; i++) {
+      if (i >= oldDelegate.texts.length) return true;
+      if (texts[i].text != oldDelegate.texts[i].text) return true;
+      if (texts[i].position != oldDelegate.texts[i].position) return true;
+    }
+    return false;
   }
 }

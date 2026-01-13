@@ -1,13 +1,19 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
 import '../../../domain/entities/stroke.dart';
 import '../../../core/providers/drawing_state.dart';
 import '../../../core/services/note_storage_service.dart';
 import '../../../core/services/pdf_export_service.dart';
+import '../../../core/services/stroke_smoothing_service.dart';
 import '../../widgets/canvas/drawing_canvas.dart';
 import '../../widgets/toolbar/drawing_toolbar.dart';
+import '../../widgets/toolbar/quick_toolbar.dart';
 
 class EditorPage extends ConsumerStatefulWidget {
   final String noteId;
@@ -37,6 +43,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   DrawingTool _currentTool = DrawingTool.pen;
   Color _currentColor = Colors.black;
   double _currentWidth = 2.0;
+  PageTemplate _currentTemplate = PageTemplate.grid;
+
+  // Stroke smoothing
+  SmoothingLevel _smoothingLevel = SmoothingLevel.medium;
 
   // Track undo/redo state
   bool _canUndo = false;
@@ -165,20 +175,81 @@ class _EditorPageState extends ConsumerState<EditorPage> {
               setState(() => _currentWidth = width);
             },
           ),
-          // Canvas
+          // Canvas with floating quick toolbar
           Expanded(
-            child: DrawingCanvas(
-              key: _canvasKey,
-              strokeColor: _currentColor,
-              strokeWidth: _currentWidth,
-              toolType: _toolTypeFromDrawingTool(_currentTool),
-              drawingTool: _currentTool,
-              onStrokesChanged: (strokes) {
-                _updateUndoRedoState();
-                if (!_hasChanges) {
-                  setState(() => _hasChanges = true);
-                }
-              },
+            child: Stack(
+              children: [
+                DrawingCanvas(
+                  key: _canvasKey,
+                  strokeColor: _currentColor,
+                  strokeWidth: _currentWidth,
+                  toolType: _toolTypeFromDrawingTool(_currentTool),
+                  drawingTool: _currentTool,
+                  pageTemplate: _currentTemplate,
+                  onStrokesChanged: (strokes) {
+                    _updateUndoRedoState();
+                    if (!_hasChanges) {
+                      setState(() => _hasChanges = true);
+                    }
+                  },
+                ),
+                // Floating quick toolbar at bottom center
+                Positioned(
+                  bottom: 16,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: QuickToolbar(
+                      currentTool: _currentTool,
+                      currentColor: _currentColor,
+                      currentWidth: _currentWidth,
+                      currentTemplate: _currentTemplate,
+                      canUndo: _canUndo,
+                      canRedo: _canRedo,
+                      hasSelection: _canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false,
+                      onToolChanged: (tool) {
+                        print('[EDITOR] Tool changed to: $tool'); // 디버그 로그
+                        setState(() => _currentTool = tool);
+                        // Clear selection when switching away from lasso
+                        if (tool != DrawingTool.lasso) {
+                          _canvasKey.currentState?.clearSelection();
+                        }
+                      },
+                      onColorChanged: (color) {
+                        setState(() => _currentColor = color);
+                      },
+                      onWidthChanged: (width) {
+                        setState(() => _currentWidth = width);
+                      },
+                      onTemplateChanged: (template) {
+                        setState(() => _currentTemplate = template);
+                      },
+                      onUndo: () {
+                        _canvasKey.currentState?.undo();
+                        _updateUndoRedoState();
+                      },
+                      onRedo: () {
+                        _canvasKey.currentState?.redo();
+                        _updateUndoRedoState();
+                      },
+                      onCopySelection: () {
+                        _canvasKey.currentState?.copySelection();
+                        _updateUndoRedoState();
+                        setState(() => _hasChanges = true);
+                      },
+                      onDeleteSelection: () {
+                        _canvasKey.currentState?.deleteSelection();
+                        _updateUndoRedoState();
+                        setState(() => _hasChanges = true);
+                      },
+                      onClearSelection: () {
+                        _canvasKey.currentState?.clearSelection();
+                        setState(() {});
+                      },
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           // Page navigation bar
@@ -409,6 +480,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         return ToolType.highlighter;
       case DrawingTool.eraser:
         return ToolType.eraser;
+      case DrawingTool.lasso:
+        return ToolType.pen; // Lasso doesn't draw strokes
     }
   }
 
@@ -544,6 +617,22 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
+              leading: const Icon(Icons.add_photo_alternate),
+              title: const Text('이미지 삽입'),
+              onTap: () {
+                Navigator.pop(context);
+                _insertImage();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.text_fields),
+              title: const Text('텍스트 삽입'),
+              onTap: () {
+                Navigator.pop(context);
+                _insertTextBox();
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.image),
               title: const Text('이미지로 내보내기'),
               onTap: () {
@@ -579,10 +668,63 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                 _showNoteInfo();
               },
             ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.auto_fix_high),
+              title: const Text('필기 보정'),
+              subtitle: Text(_getSmoothingLevelText(_smoothingLevel)),
+              onTap: () {
+                Navigator.pop(context);
+                _showSmoothingDialog();
+              },
+            ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _insertImage() async {
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+
+      if (pickedFile == null) return;
+
+      // Copy image to app's directory for persistence
+      final appDir = await getApplicationDocumentsDirectory();
+      final imagesDir = Directory('${appDir.path}${Platform.pathSeparator}Winote${Platform.pathSeparator}images');
+      if (!await imagesDir.exists()) {
+        await imagesDir.create(recursive: true);
+      }
+
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}${path.extension(pickedFile.path)}';
+      final savedPath = '${imagesDir.path}${Platform.pathSeparator}$fileName';
+
+      await File(pickedFile.path).copy(savedPath);
+
+      // Add image to canvas
+      await _canvasKey.currentState?.addImage(savedPath);
+
+      setState(() => _hasChanges = true);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('이미지가 삽입되었습니다')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('이미지 삽입 실패: $e')),
+        );
+      }
+    }
+  }
+
+  void _insertTextBox() {
+    _canvasKey.currentState?.addTextBox();
+    setState(() => _hasChanges = true);
   }
 
   void _showNoteInfo() {
@@ -620,6 +762,74 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         ],
       ),
     );
+  }
+
+  String _getSmoothingLevelText(SmoothingLevel level) {
+    switch (level) {
+      case SmoothingLevel.none:
+        return '없음 (원본 그대로)';
+      case SmoothingLevel.light:
+        return '약하게 (빠른 필기용)';
+      case SmoothingLevel.medium:
+        return '보통 (권장)';
+      case SmoothingLevel.strong:
+        return '강하게 (악필 교정)';
+    }
+  }
+
+  void _showSmoothingDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('필기 보정 강도'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '필기 시 떨림을 보정하고 부드러운 곡선으로 만들어줍니다.',
+              style: TextStyle(fontSize: 13, color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            ...SmoothingLevel.values.map((level) => RadioListTile<SmoothingLevel>(
+              title: Text(_getSmoothingLevelText(level)),
+              subtitle: Text(_getSmoothingDescription(level)),
+              value: level,
+              groupValue: _smoothingLevel,
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() => _smoothingLevel = value);
+                  StrokeSmoothingService.instance.level = value;
+                  Navigator.pop(context);
+
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('필기 보정: ${_getSmoothingLevelText(value)}')),
+                  );
+                }
+              },
+            )),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('닫기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getSmoothingDescription(SmoothingLevel level) {
+    switch (level) {
+      case SmoothingLevel.none:
+        return '입력 그대로 표시';
+      case SmoothingLevel.light:
+        return '미세한 떨림만 제거';
+      case SmoothingLevel.medium:
+        return '자연스러운 곡선 보정';
+      case SmoothingLevel.strong:
+        return '강력한 스무딩 적용';
+    }
   }
 
   Future<void> _exportToPdf() async {

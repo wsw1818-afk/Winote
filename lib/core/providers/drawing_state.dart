@@ -1,11 +1,22 @@
 import 'package:flutter/material.dart';
 import '../../domain/entities/stroke.dart';
+import '../services/stroke_smoothing_service.dart';
 
 /// Tool types available in the drawing canvas
 enum DrawingTool {
   pen,
   highlighter,
   eraser,
+  lasso, // 올가미 선택 도구
+}
+
+/// Page template types for different note styles
+enum PageTemplate {
+  blank,      // 빈 페이지
+  lined,      // 줄 노트
+  grid,       // 격자 노트
+  dotted,     // 점 노트
+  cornell,    // 코넬 노트
 }
 
 /// Drawing state provider for managing canvas state
@@ -29,6 +40,10 @@ class DrawingState extends ChangeNotifier {
   // Eraser settings
   double _eraserWidth = 20.0;
   double get eraserWidth => _eraserWidth;
+
+  // Stroke smoothing (필기 보정)
+  SmoothingLevel _smoothingLevel = SmoothingLevel.medium;
+  SmoothingLevel get smoothingLevel => _smoothingLevel;
 
   // Strokes and history for undo/redo
   List<Stroke> _strokes = [];
@@ -119,6 +134,13 @@ class DrawingState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Set stroke smoothing level (필기 보정 강도)
+  void setSmoothingLevel(SmoothingLevel level) {
+    _smoothingLevel = level;
+    StrokeSmoothingService.instance.level = level;
+    notifyListeners();
+  }
+
   /// Get current color based on tool
   Color get currentColor {
     switch (_currentTool) {
@@ -127,7 +149,8 @@ class DrawingState extends ChangeNotifier {
       case DrawingTool.highlighter:
         return _highlighterColor;
       case DrawingTool.eraser:
-        return Colors.white; // Not used for eraser
+      case DrawingTool.lasso:
+        return Colors.white; // Not used for eraser/lasso
     }
   }
 
@@ -139,7 +162,8 @@ class DrawingState extends ChangeNotifier {
       case DrawingTool.highlighter:
         return _highlighterWidth;
       case DrawingTool.eraser:
-        return _eraserWidth;
+      case DrawingTool.lasso:
+        return _eraserWidth; // Lasso uses eraser width for visual
     }
   }
 
@@ -218,7 +242,7 @@ class DrawingState extends ChangeNotifier {
   /// Update canvas transform
   void setTransform({double? scale, Offset? offset}) {
     if (scale != null) {
-      _scale = scale.clamp(0.1, 5.0);
+      _scale = scale.clamp(1.0, 1.5);
     }
     if (offset != null) {
       _offset = offset;
