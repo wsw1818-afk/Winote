@@ -358,6 +358,19 @@ class DrawingCanvasState extends State<DrawingCanvas> {
             ),
           ),
         ),
+        // Lasso overlay - OUTSIDE RepaintBoundary for immediate updates
+        if (_lassoPath.isNotEmpty && widget.drawingTool == DrawingTool.lasso)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: _LassoOverlayPainter(
+                  lassoPath: _lassoPath,
+                  scale: _scale,
+                  offset: _offset,
+                ),
+              ),
+            ),
+          ),
         // Debug overlay (toggleable)
         if (widget.showDebugOverlay && _showDebug)
           Positioned(
@@ -680,8 +693,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
-    // Touch input check
-    if (!allowed) {
+    // Touch input check (올가미 도구는 예외 - 첫 터치 허용)
+    final isLassoFirstTouch = widget.drawingTool == DrawingTool.lasso && _activePointerId == null;
+    if (!allowed && !isLassoFirstTouch) {
       setState(() {
         _lastDeviceKind = '${_getDeviceKindName(event.kind)} (ignored)';
       });
@@ -692,7 +706,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _activePointerId = event.pointer;
     _isPenDrawing = true;
     _penDrawStartTime = DateTime.now().millisecondsSinceEpoch;
-    _log('Pointer activated: ${event.pointer}, currentTool: ${widget.drawingTool}');
+    _log('Pointer activated: ${event.pointer}, currentTool: ${widget.drawingTool}, isLassoFirstTouch: $isLassoFirstTouch');
 
     // Handle eraser tool
     if (widget.drawingTool == DrawingTool.eraser) {
@@ -1613,6 +1627,70 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 }
 
+/// Lasso overlay painter - draws OUTSIDE RepaintBoundary for immediate updates
+class _LassoOverlayPainter extends CustomPainter {
+  final List<Offset> lassoPath;
+  final double scale;
+  final Offset offset;
+
+  _LassoOverlayPainter({
+    required this.lassoPath,
+    required this.scale,
+    required this.offset,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (lassoPath.isEmpty) return;
+
+    debugPrint('[LASSO OVERLAY] Drawing ${lassoPath.length} points');
+
+    // Convert canvas coordinates to screen coordinates
+    final screenPath = lassoPath.map((p) {
+      return Offset(
+        p.dx * scale + offset.dx,
+        p.dy * scale + offset.dy,
+      );
+    }).toList();
+
+    // Draw lasso path
+    final paint = Paint()
+      ..color = Colors.blue.withOpacity(0.6)
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    if (screenPath.length >= 2) {
+      final path = Path();
+      path.moveTo(screenPath.first.dx, screenPath.first.dy);
+      for (int i = 1; i < screenPath.length; i++) {
+        path.lineTo(screenPath[i].dx, screenPath[i].dy);
+      }
+      canvas.drawPath(path, paint);
+    }
+
+    // Draw start point indicator
+    final startPaint = Paint()
+      ..color = Colors.blue
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(screenPath.first, 5.0, startPaint);
+
+    // Draw current point indicator
+    final currentPaint = Paint()
+      ..color = Colors.red
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(screenPath.last, 4.0, currentPaint);
+  }
+
+  @override
+  bool shouldRepaint(_LassoOverlayPainter oldDelegate) {
+    return lassoPath.length != oldDelegate.lassoPath.length ||
+        scale != oldDelegate.scale ||
+        offset != oldDelegate.offset;
+  }
+}
+
 /// Template background painter - supports multiple page templates
 class _TemplatePainter extends CustomPainter {
   final PageTemplate template;
@@ -1808,9 +1886,18 @@ class _StrokePainter extends CustomPainter {
       canvas.drawCircle(eraserPosition!, eraserRadius, eraserPaint);
     }
 
-    // Draw lasso path
-    if (lassoPath.isNotEmpty) {
-      // Main lasso stroke paint (dashed style effect via multiple segments)
+    // Draw lasso path - only when selection is complete (selectedStrokeIds.isNotEmpty)
+    // During drawing, lasso path is rendered by _LassoOverlayPainter (outside RepaintBoundary)
+    if (lassoPath.isNotEmpty && selectedStrokeIds.isNotEmpty) {
+      // 디버그: 선택 완료 후 올가미 경로 그리기
+      debugPrint('[PAINT] Drawing completed lasso path with ${lassoPath.length} points');
+
+      // Semi-transparent fill for selected area
+      final lassoFillPaint = Paint()
+        ..color = Colors.blue.withOpacity(0.08)
+        ..style = PaintingStyle.fill;
+
+      // Main lasso stroke paint
       final lassoPaint = Paint()
         ..color = Colors.blue.withOpacity(0.8)
         ..style = PaintingStyle.stroke
@@ -1818,7 +1905,7 @@ class _StrokePainter extends CustomPainter {
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round;
 
-      // White outline for better visibility on dark backgrounds
+      // White outline for better visibility
       final lassoOutlinePaint = Paint()
         ..color = Colors.white.withOpacity(0.9)
         ..style = PaintingStyle.stroke
@@ -1826,40 +1913,19 @@ class _StrokePainter extends CustomPainter {
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round;
 
-      // Semi-transparent fill
-      final lassoFillPaint = Paint()
-        ..color = Colors.blue.withOpacity(0.08)
-        ..style = PaintingStyle.fill;
-
       final path = Path();
       path.moveTo(lassoPath.first.dx, lassoPath.first.dy);
       for (int i = 1; i < lassoPath.length; i++) {
         path.lineTo(lassoPath[i].dx, lassoPath[i].dy);
       }
 
-      // Only close and fill if we have enough points (selection complete)
-      if (lassoPath.length >= 3 && selectedStrokeIds.isNotEmpty) {
+      if (lassoPath.length >= 3) {
         path.close();
         canvas.drawPath(path, lassoFillPaint);
       }
 
-      // Draw white outline first, then blue line on top
       canvas.drawPath(path, lassoOutlinePaint);
       canvas.drawPath(path, lassoPaint);
-
-      // Draw start point indicator (circle at first point)
-      if (lassoPath.length >= 2 && selectedStrokeIds.isEmpty) {
-        final startPointPaint = Paint()
-          ..color = Colors.blue
-          ..style = PaintingStyle.fill;
-        canvas.drawCircle(lassoPath.first, 5.0, startPointPaint);
-
-        // Draw current end point
-        final endPointPaint = Paint()
-          ..color = Colors.blue.withOpacity(0.6)
-          ..style = PaintingStyle.fill;
-        canvas.drawCircle(lassoPath.last, 4.0, endPointPaint);
-      }
     }
 
     // Draw selection bounding box
