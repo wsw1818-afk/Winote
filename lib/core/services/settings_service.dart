@@ -139,6 +139,14 @@ class SettingsService {
     await _save();
   }
 
+  // Lasso Color
+  Color get lassoColor => Color(_settings['lassoColor'] as int? ?? 0xFF2196F3); // Default: Blue
+
+  Future<void> setLassoColor(Color color) async {
+    _settings['lassoColor'] = color.value;
+    await _save();
+  }
+
   // Recent colors (last used colors, auto-managed)
   List<Color> get recentColors {
     final colorInts = _settings['recentColors'] as List<dynamic>? ?? [];
@@ -153,6 +161,14 @@ class SettingsService {
       colors = colors.sublist(0, 10); // Keep only last 10
     }
     _settings['recentColors'] = colors;
+    await _save();
+  }
+
+  // Theme Mode (0: system, 1: light, 2: dark)
+  int get themeModeIndex => _settings['themeMode'] as int? ?? 0;
+
+  Future<void> setThemeModeIndex(int index) async {
+    _settings['themeMode'] = index;
     await _save();
   }
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -7,6 +8,8 @@ import '../../../domain/entities/stroke.dart';
 import '../../../domain/entities/stroke_point.dart';
 import '../../../domain/entities/canvas_image.dart';
 import '../../../domain/entities/canvas_text.dart';
+import '../../../domain/entities/canvas_shape.dart';
+import '../../../domain/entities/canvas_table.dart';
 import '../../../core/services/windows_pointer_service.dart';
 import '../../../core/services/stroke_smoothing_service.dart';
 import '../../../core/providers/drawing_state.dart';
@@ -31,6 +34,15 @@ class DrawingCanvas extends StatefulWidget {
   final void Function(List<CanvasImage>)? onImagesChanged;
   final List<CanvasText>? initialTexts;
   final void Function(List<CanvasText>)? onTextsChanged;
+  final Color lassoColor;
+  final void Function(bool hasSelection)? onImageSelectionChanged;
+  final List<CanvasShape>? initialShapes;
+  final void Function(List<CanvasShape>)? onShapesChanged;
+  final void Function(bool hasSelection)? onShapeSelectionChanged;
+  final List<CanvasTable>? initialTables;
+  final void Function(List<CanvasTable>)? onTablesChanged;
+  final void Function(bool hasSelection)? onTableSelectionChanged;
+  final void Function(double scale, Offset offset)? onTransformChanged;
 
   const DrawingCanvas({
     super.key,
@@ -50,6 +62,15 @@ class DrawingCanvas extends StatefulWidget {
     this.onImagesChanged,
     this.initialTexts,
     this.onTextsChanged,
+    this.lassoColor = const Color(0xFF2196F3), // Default: Blue
+    this.onImageSelectionChanged,
+    this.initialShapes,
+    this.onShapesChanged,
+    this.onShapeSelectionChanged,
+    this.initialTables,
+    this.onTablesChanged,
+    this.onTableSelectionChanged,
+    this.onTransformChanged,
   });
 
   @override
@@ -135,12 +156,63 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   Offset? _imageDragStart;
   bool _isResizingImage = false;
   String? _resizeCorner; // 'tl', 'tr', 'bl', 'br'
+  bool _isRotatingImage = false;
+  double? _imageRotationStart;
 
   // Text boxes on canvas
   List<CanvasText> _texts = [];
   String? _selectedTextId;
   bool _isDraggingText = false;
   Offset? _textDragStart;
+
+  // Double-tap detection for text editing
+  int? _lastTextTapTime;
+  String? _lastTappedTextId;
+
+  // Shape drawing (temporary while drawing)
+  Offset? _shapeStartPoint;
+  Offset? _shapeEndPoint;
+  bool _isDrawingShape = false;
+
+  // Editable shapes on canvas
+  List<CanvasShape> _shapes = [];
+  String? _selectedShapeId;
+  bool _isDraggingShape = false;
+  Offset? _shapeDragStart;
+  int? _draggingShapeHandle; // 0 = start, 1 = end
+
+  // Tables on canvas
+  List<CanvasTable> _tables = [];
+  String? _selectedTableId;
+  bool _isDraggingTable = false;
+  Offset? _tableDragStart;
+
+  // Long press drag for shapes/tables (1 second hold to start drag)
+  static const int _longPressDuration = 1000; // 1 second in ms
+  int? _elementTapStartTime;
+  Offset? _elementTapStartPos;
+  String? _pendingDragElementId;
+  String? _pendingDragElementType; // 'shape' or 'table'
+  bool _longPressTriggered = false;
+  Timer? _longPressTimer; // 롱프레스 타이머
+
+  // 드래그 준비 상태 (타이머 발동 후, 실제 이동 전)
+  String? _readyToDragTableId;
+  String? _readyToDragShapeId;
+
+  // Table cell border resize state (long press activated)
+  bool _isResizingTableBorder = false;
+  bool _isWaitingForResizeLongPress = false; // Waiting for long press on border
+  Timer? _resizeLongPressTimer;
+  String? _resizingTableId;
+  int _resizingColumnIndex = -1; // Column index being resized (-1 = none)
+  int _resizingRowIndex = -1; // Row index being resized (-1 = none)
+  double _resizeStartX = 0;
+  double _resizeStartY = 0;
+  double _originalColumnWidth = 0;
+  double _originalRowHeight = 0;
+  Offset _resizeBorderStartPos = Offset.zero; // Position where border was touched
+  static const Duration _resizeLongPressDuration = Duration(milliseconds: 1000); // 1 second
 
   @override
   void initState() {
@@ -162,6 +234,85 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Load initial texts if provided
     if (widget.initialTexts != null) {
       _texts = List.from(widget.initialTexts!);
+    }
+    // Load initial shapes if provided
+    if (widget.initialShapes != null) {
+      _shapes = List.from(widget.initialShapes!);
+    }
+    // Load initial tables if provided
+    if (widget.initialTables != null) {
+      _tables = List.from(widget.initialTables!);
+    }
+  }
+
+  @override
+  void dispose() {
+    _longPressTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 롱프레스 드래그 준비 상태 트리거 (타이머에서 호출)
+  /// 실제 드래그는 onPointerMove에서 이동 감지 시 시작
+  void _triggerLongPressDrag() {
+    if (_longPressTriggered) return;
+
+    _longPressTriggered = true;
+    _perfLog('LONG_PRESS_READY', inputType: 'timer', pos: _elementTapStartPos ?? Offset.zero);
+    _log('Long press triggered for $_pendingDragElementType: $_pendingDragElementId');
+
+    // 펜으로 그리던 스트로크가 있으면 취소
+    if (_currentStroke != null) {
+      _log('Canceling current stroke for element drag');
+      _currentStroke = null;
+    }
+
+    // 롱프레스 대기 중에 저장된 짧은 스트로크 삭제 (점 또는 아주 짧은 선)
+    if (_elementTapStartPos != null && _strokes.isNotEmpty) {
+      final tapPos = _elementTapStartPos!;
+      final recentStrokesToRemove = <int>[];
+
+      // 최근 3개 스트로크만 검사 (성능 최적화)
+      final startIdx = (_strokes.length - 3).clamp(0, _strokes.length);
+      for (int i = startIdx; i < _strokes.length; i++) {
+        final stroke = _strokes[i];
+        // 점이거나 (포인트 1~2개) 롱프레스 위치 근처의 짧은 스트로크인 경우
+        if (stroke.points.length <= 3) {
+          final firstPoint = stroke.points.first;
+          final distance = (Offset(firstPoint.x, firstPoint.y) - tapPos).distance;
+          if (distance < 50) { // 50픽셀 이내
+            recentStrokesToRemove.add(i);
+            _log('Removing short stroke at index $i (${stroke.points.length} points, distance: ${distance.toStringAsFixed(1)})');
+          }
+        }
+      }
+
+      // 역순으로 삭제 (인덱스 유지)
+      for (final idx in recentStrokesToRemove.reversed) {
+        _strokes.removeAt(idx);
+      }
+    }
+
+    // 드래그 준비 상태만 설정 (실제 드래그는 onPointerMove에서 시작)
+    if (_pendingDragElementType == 'shape') {
+      setState(() {
+        _readyToDragShapeId = _pendingDragElementId;
+        _selectedShapeId = _pendingDragElementId;
+        _lastDeviceKind = 'Shape (ready to drag)';
+        _selectedTableId = null;
+        _selectedImageId = null;
+        _selectedTextId = null;
+      });
+      widget.onShapeSelectionChanged?.call(true);
+    } else if (_pendingDragElementType == 'table') {
+      setState(() {
+        _readyToDragTableId = _pendingDragElementId;
+        _selectedTableId = _pendingDragElementId;
+        _lastDeviceKind = 'Table (ready to drag)';
+        _selectedShapeId = null;
+        _selectedImageId = null;
+        _selectedTextId = null;
+      });
+      widget.onTableSelectionChanged?.call(true);
     }
   }
 
@@ -265,8 +416,20 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _logFile?.writeAsStringSync('${parts.join(' | ')}\n', mode: FileMode.append);
   }
 
+  /// Cancel resize long press waiting state and reset related variables
+  void _cancelResizeLongPressState({String reason = 'cancelled'}) {
+    _resizeLongPressTimer?.cancel();
+    _resizeLongPressTimer = null;
+    _isWaitingForResizeLongPress = false;
+    _resizingTableId = null;
+    _resizingColumnIndex = -1;
+    _resizingRowIndex = -1;
+    _resizeBorderStartPos = Offset.zero;
+    _perfLog('TABLE_RESIZE_LONGPRESS_CANCELLED', inputType: reason);
+  }
+
   // Enable performance profiling log
-  static const bool _enableVerboseLogging = true;  // 올가미 디버깅용
+  static const bool _enableVerboseLogging = false;  // 성능 최적화 (디버깅 시 true로 변경)
   static const bool _enablePerformanceLog = true;
 
   // Performance tracking
@@ -318,6 +481,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                   ),
                   // Images layer
                   RepaintBoundary(
+                    key: ValueKey('images_${_images.length}_${_images.map((i) => i.id).join('_')}_sel_$_selectedImageId'),
                     child: CustomPaint(
                       painter: _ImagePainter(
                         images: _images,
@@ -327,8 +491,32 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                       size: Size.infinite,
                     ),
                   ),
+                  // Shapes layer (드래그 중 실시간 업데이트를 위해 key 사용)
+                  CustomPaint(
+                    key: ValueKey('shapes_${_shapes.length}_${_shapes.map((s) => '${s.id}_${s.startPoint.dx.toInt()}_${s.startPoint.dy.toInt()}').join('_')}'),
+                    painter: _ShapePainter(
+                      shapes: _shapes,
+                      selectedShapeId: _selectedShapeId,
+                    ),
+                    size: Size.infinite,
+                  ),
+                  // Tables layer (드래그 중 실시간 업데이트를 위해 key 사용)
+                  CustomPaint(
+                    key: ValueKey('tables_${_tables.length}_${_tables.map((t) => '${t.id}_${t.position.dx.toInt()}_${t.position.dy.toInt()}').join('_')}_ready_${_readyToDragTableId ?? ""}_drag_${_isDraggingTable ? _selectedTableId : ""}_resize_${_isWaitingForResizeLongPress || _isResizingTableBorder ? _resizingTableId : ""}_col_${_resizingColumnIndex}_row_${_resizingRowIndex}_active_$_isResizingTableBorder'),
+                    painter: _TablePainter(
+                      tables: _tables,
+                      selectedTableId: _selectedTableId,
+                      readyToDragId: _readyToDragTableId,
+                      resizeWaitingTableId: (_isWaitingForResizeLongPress || _isResizingTableBorder) ? _resizingTableId : null,
+                      resizeWaitingColumnIndex: _resizingColumnIndex,
+                      resizeWaitingRowIndex: _resizingRowIndex,
+                      isResizeActive: _isResizingTableBorder,
+                    ),
+                    size: Size.infinite,
+                  ),
                   // Text layer
                   RepaintBoundary(
+                    key: ValueKey('texts_${_texts.length}_${_texts.map((t) => t.id).join('_')}_sel_$_selectedTextId'),
                     child: CustomPaint(
                       painter: _TextPainter(
                         texts: _texts,
@@ -339,6 +527,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                   ),
                   // Drawing area with RepaintBoundary for performance
                   RepaintBoundary(
+                    key: ValueKey('strokes_${_strokes.length}_${_selectedStrokeIds.length}_lasso_${_lassoPath.length}'),
                     child: CustomPaint(
                       painter: _StrokePainter(
                         strokes: _strokes,
@@ -349,6 +538,13 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                         selectedStrokeIds: _selectedStrokeIds,
                         selectionOffset: _selectionOffset,
                         selectionBounds: _getSelectionBounds(),
+                        lassoColor: widget.lassoColor,
+                        // Shape preview
+                        shapeStartPoint: _shapeStartPoint,
+                        shapeEndPoint: _shapeEndPoint,
+                        shapeTool: _isDrawingShape ? widget.drawingTool : null,
+                        shapeColor: widget.strokeColor,
+                        shapeWidth: widget.strokeWidth,
                       ),
                       size: Size.infinite,
                     ),
@@ -359,14 +555,23 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           ),
         ),
         // Lasso overlay - OUTSIDE RepaintBoundary for immediate updates
-        if (_lassoPath.isNotEmpty && widget.drawingTool == DrawingTool.lasso)
-          Positioned.fill(
+        // Key forces rebuild when path length changes
+        if (widget.drawingTool == DrawingTool.lasso && _lassoPath.isNotEmpty)
+          Positioned(
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
             child: IgnorePointer(
               child: CustomPaint(
+                key: ValueKey('lasso_overlay_${_lassoPath.length}'),
+                isComplex: true,
+                willChange: true,
                 painter: _LassoOverlayPainter(
                   lassoPath: _lassoPath,
                   scale: _scale,
                   offset: _offset,
+                  lassoColor: widget.lassoColor,
                 ),
               ),
             ),
@@ -631,6 +836,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     _perfLog('DOWN start', inputType: nativeType?.name ?? 'unknown', pos: event.localPosition);
 
+    // Track if finger tapped on element (set in finger touch block)
+    bool tappedOnElement = false;
+
     // 올가미 도구: S-Pen이 touch로 감지되어도 첫 포인터는 올가미로 처리
     // Windows에서 S-Pen은 종종 touch로 감지되므로, 올가미 도구 선택 시 첫 터치를 허용
     if (widget.drawingTool == DrawingTool.lasso && _activePointerId == null) {
@@ -639,8 +847,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _log('=== LASSO TOOL ACTIVE === Allowing first pointer for lasso, isFingerTouch: $isFingerTouch');
     }
     // Track all finger touches for gestures (올가미 도구가 아닐 때만)
-    else if (isFingerTouch) {
-      _log('=== FINGER TOUCH DETECTED === Entering pan/gesture mode, NOT reaching lasso handler!');
+    // 핀치 줌 시작: 첫 번째 손가락이 이미 등록된 상태에서 두 번째 손가락이 오면 PEN으로 감지되어도 추가
+    // Windows에서 두 번째 손가락이 PEN으로 감지되는 문제 해결
+    else if (isFingerTouch || (_activePointers.isNotEmpty && !_isPenDrawing)) {
+      _log('=== FINGER TOUCH DETECTED === Checking for element tap first');
       // PALM REJECTION: Ignore finger touches while S-Pen is drawing
       // or shortly after S-Pen was used (500ms grace period)
       if (_isPenDrawing) {
@@ -654,34 +864,80 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         return;
       }
 
-      _activePointers[event.pointer] = event.localPosition;
-      _perfLog('FINGER-PAN start', inputType: 'TOUCH', pos: event.localPosition);
+      // Check if finger is tapping on an element (image/text/shape/table)
+      // If so, allow element manipulation instead of pan/zoom
+      final canvasPosForElementCheck = _screenToCanvas(event.localPosition);
 
-      // If 2+ fingers, start gesture mode (pinch zoom + pan)
-      if (_activePointers.length >= 2) {
-        _isGesturing = true;
-        _baseScale = _scale;
-        _baseOffset = _offset;
-        _baseSpan = _getGestureSpan();
-        _lastFocalPoint = _getGestureFocalPoint();
-
-        // Start two-finger tap detection
-        final positions = _activePointers.values.toList();
-        _twoFingerTapStartTime = DateTime.now().millisecondsSinceEpoch;
-        _twoFingerTapStartPos1 = positions[0];
-        _twoFingerTapStartPos2 = positions[1];
-        _twoFingerMoved = false;
-
-        _perfLog('GESTURE-ZOOM start', inputType: 'MULTI-TOUCH');
-        return;
+      // Check images
+      for (final image in _images) {
+        if (image.containsPoint(canvasPosForElementCheck)) {
+          tappedOnElement = true;
+          break;
+        }
+      }
+      // Check texts
+      if (!tappedOnElement) {
+        for (final text in _texts) {
+          if (text.containsPoint(canvasPosForElementCheck)) {
+            tappedOnElement = true;
+            break;
+          }
+        }
+      }
+      // Check shapes
+      if (!tappedOnElement) {
+        for (final shape in _shapes) {
+          if (shape.containsPoint(canvasPosForElementCheck)) {
+            tappedOnElement = true;
+            break;
+          }
+        }
+      }
+      // Check tables
+      if (!tappedOnElement) {
+        for (final table in _tables) {
+          if (table.containsPoint(canvasPosForElementCheck)) {
+            tappedOnElement = true;
+            break;
+          }
+        }
       }
 
-      // Single finger touch - pan mode
-      _lastFocalPoint = event.localPosition;
-      setState(() {
-        _lastDeviceKind = '${_getDeviceKindName(event.kind)} (gesture)';
-      });
-      return;
+      // If tapped on element, skip gesture mode and let element handling code run
+      if (tappedOnElement) {
+        _log('Finger tapped on element, allowing element manipulation');
+        // Fall through to element tap handling below
+      } else {
+        // No element tapped - enter pan/gesture mode
+        _activePointers[event.pointer] = event.localPosition;
+        _perfLog('FINGER-PAN start', inputType: 'TOUCH', pos: event.localPosition);
+
+        // If 2+ fingers, start gesture mode (pinch zoom + pan)
+        if (_activePointers.length >= 2) {
+          _isGesturing = true;
+          _baseScale = _scale;
+          _baseOffset = _offset;
+          _baseSpan = _getGestureSpan();
+          _lastFocalPoint = _getGestureFocalPoint();
+
+          // Start two-finger tap detection
+          final positions = _activePointers.values.toList();
+          _twoFingerTapStartTime = DateTime.now().millisecondsSinceEpoch;
+          _twoFingerTapStartPos1 = positions[0];
+          _twoFingerTapStartPos2 = positions[1];
+          _twoFingerMoved = false;
+
+          _perfLog('GESTURE-ZOOM start', inputType: 'MULTI-TOUCH');
+          return;
+        }
+
+        // Single finger touch - pan mode
+        _lastFocalPoint = event.localPosition;
+        setState(() {
+          _lastDeviceKind = '${_getDeviceKindName(event.kind)} (gesture)';
+        });
+        return;
+      }
     }
 
     // Ignore new touches while drawing (palm rejection)
@@ -693,9 +949,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
-    // Touch input check (올가미 도구는 예외 - 첫 터치 허용)
+    // Touch input check (올가미 도구와 요소 탭은 예외)
     final isLassoFirstTouch = widget.drawingTool == DrawingTool.lasso && _activePointerId == null;
-    if (!allowed && !isLassoFirstTouch) {
+    if (!allowed && !isLassoFirstTouch && !tappedOnElement) {
       setState(() {
         _lastDeviceKind = '${_getDeviceKindName(event.kind)} (ignored)';
       });
@@ -708,8 +964,366 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _penDrawStartTime = DateTime.now().millisecondsSinceEpoch;
     _log('Pointer activated: ${event.pointer}, currentTool: ${widget.drawingTool}, isLassoFirstTouch: $isLassoFirstTouch');
 
+    // Check if tapping on an image or text first (any tool)
+    final canvasPosForHitTest = _screenToCanvas(event.localPosition);
+
+    // 펜/하이라이터/지우개 도구일 때는 이미지/텍스트/도형/표 위에서도 동작 가능하도록 선택 건너뛰기
+    final isDrawingOrEraserTool = widget.drawingTool == DrawingTool.pen ||
+                                   widget.drawingTool == DrawingTool.highlighter ||
+                                   widget.drawingTool == DrawingTool.eraser;
+
+    // Check for image tap (reversed order to select topmost) - only when NOT drawing
+    if (!isDrawingOrEraserTool) {
+      for (int i = _images.length - 1; i >= 0; i--) {
+        final image = _images[i];
+        if (image.containsPoint(canvasPosForHitTest)) {
+          // Check for rotation handle first if already selected
+          if (_selectedImageId == image.id && _isOnRotationHandle(image, canvasPosForHitTest)) {
+            _isRotatingImage = true;
+            _imageRotationStart = image.rotation;
+            _imageDragStart = canvasPosForHitTest;
+            setState(() {
+              _lastDeviceKind = 'Image (rotate)';
+            });
+            return;
+          }
+
+          // Check for resize handle if already selected
+          if (_selectedImageId == image.id) {
+            final handle = _getResizeHandle(image, canvasPosForHitTest);
+            if (handle != null) {
+              _isResizingImage = true;
+              _resizeCorner = handle;
+              _imageDragStart = canvasPosForHitTest;
+              setState(() {
+                _lastDeviceKind = 'Image (resize)';
+              });
+              return;
+            }
+          }
+
+          // Select or drag the image
+          if (_selectedImageId == image.id) {
+            // Start dragging
+            _isDraggingImage = true;
+            _imageDragStart = canvasPosForHitTest;
+          } else {
+            // Select the image
+            setState(() {
+              _selectedImageId = image.id;
+              _selectedTextId = null;
+            });
+            widget.onImageSelectionChanged?.call(true);
+          }
+          setState(() {
+            _lastDeviceKind = 'Image';
+          });
+          return;
+        }
+      }
+    }
+
+    // Check for text tap (with double-tap detection for editing) - only when NOT drawing
+    if (!isDrawingOrEraserTool) {
+      for (int i = _texts.length - 1; i >= 0; i--) {
+        final text = _texts[i];
+        if (text.containsPoint(canvasPosForHitTest)) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+
+          // Check for double-tap (same text, within 400ms)
+          if (_lastTappedTextId == text.id &&
+              _lastTextTapTime != null &&
+              (now - _lastTextTapTime!) < 400) {
+            // Double-tap detected - show edit dialog
+            _showTextEditDialog(text);
+            _lastTappedTextId = null;
+            _lastTextTapTime = null;
+            return;
+          }
+
+          // Record tap for double-tap detection
+          _lastTappedTextId = text.id;
+          _lastTextTapTime = now;
+
+          if (_selectedTextId == text.id) {
+            _isDraggingText = true;
+            _textDragStart = canvasPosForHitTest;
+          } else {
+            setState(() {
+              _selectedTextId = text.id;
+              _selectedImageId = null;
+            });
+            widget.onImageSelectionChanged?.call(false);
+          }
+          setState(() {
+            _lastDeviceKind = 'Text';
+          });
+          return;
+        }
+      }
+    }
+
+    // Check for shape tap (with handle detection for editing) - only when NOT drawing
+    if (!isDrawingOrEraserTool) {
+      for (int i = _shapes.length - 1; i >= 0; i--) {
+        final shape = _shapes[i];
+
+        // Check for handle tap if already selected
+        if (_selectedShapeId == shape.id) {
+          final handleIndex = shape.getHandleAt(canvasPosForHitTest);
+          if (handleIndex != null) {
+            _isDraggingShape = true;
+            _draggingShapeHandle = handleIndex;
+            _shapeDragStart = canvasPosForHitTest;
+            setState(() {
+              _lastDeviceKind = 'Shape (handle)';
+            });
+            return;
+          }
+        }
+
+        // Check for shape body tap
+        if (shape.containsPoint(canvasPosForHitTest)) {
+          // Select the shape
+          setState(() {
+            _selectedShapeId = shape.id;
+            _selectedImageId = null;
+            _selectedTextId = null;
+            _selectedTableId = null;
+          });
+          widget.onShapeSelectionChanged?.call(true);
+          widget.onImageSelectionChanged?.call(false);
+          widget.onTableSelectionChanged?.call(false);
+
+          // Setup for long press drag (wait before enabling drag)
+          _longPressTimer?.cancel();
+          _elementTapStartTime = DateTime.now().millisecondsSinceEpoch;
+          _elementTapStartPos = canvasPosForHitTest;
+          _pendingDragElementId = shape.id;
+          _pendingDragElementType = 'shape';
+          _longPressTriggered = false;
+          _shapeDragStart = canvasPosForHitTest;
+
+          // 1초 후 롱프레스 트리거 (타이머 사용)
+          _perfLog('TIMER_START', inputType: 'select-shape:${shape.id}', pos: canvasPosForHitTest);
+          _longPressTimer = Timer(Duration(milliseconds: _longPressDuration), () {
+            _perfLog('TIMER_FIRED', inputType: 'pendingId=$_pendingDragElementId,triggered=$_longPressTriggered', pos: _elementTapStartPos);
+            if (_pendingDragElementId != null && !_longPressTriggered && mounted) {
+              _triggerLongPressDrag();
+            }
+          });
+
+          setState(() {
+            _lastDeviceKind = 'Shape (hold to drag)';
+          });
+          return;
+        }
+      }
+    }
+
+    // Check for table interactions - cell borders for resize, left edge for drag
+    // Both require 1 second long press
+    // NOTE: Check cell borders FIRST (tolerance: 6.0), then left edge (tolerance: 15.0)
+    //       to avoid left edge capturing cell border touches
+    for (int i = _tables.length - 1; i >= 0; i--) {
+      final table = _tables[i];
+
+      // First check: Column border for resize (higher priority than left edge)
+      final colBorder = table.getColumnBorderAt(canvasPosForHitTest, tolerance: 6.0);
+      if (colBorder >= 0) {
+        // Start waiting for long press
+        _isWaitingForResizeLongPress = true;
+        _resizingTableId = table.id;
+        _resizingColumnIndex = colBorder;
+        _resizingRowIndex = -1;
+        _resizeBorderStartPos = canvasPosForHitTest;
+        _originalColumnWidth = table.getColumnWidth(colBorder);
+        setState(() {}); // Trigger repaint to show visual feedback
+        _perfLog('TABLE_COLUMN_RESIZE_WAITING', inputType: 'col=$colBorder', pos: canvasPosForHitTest);
+
+        // Start 1 second timer for long press
+        _resizeLongPressTimer?.cancel();
+        _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
+          if (_isWaitingForResizeLongPress && _resizingTableId != null && mounted) {
+            // Long press triggered - activate resize mode
+            _isWaitingForResizeLongPress = false;
+            _isResizingTableBorder = true;
+            _resizeStartX = _resizeBorderStartPos.dx;
+            // Cancel any drawing in progress
+            _currentStroke = null;
+            setState(() {
+              _selectedTableId = _resizingTableId;
+              _lastDeviceKind = 'Table (resize column - active)';
+            });
+            _perfLog('TABLE_COLUMN_RESIZE_ACTIVATED', inputType: 'col=$_resizingColumnIndex', pos: _resizeBorderStartPos);
+          }
+        });
+        // Don't return - allow drawing to start, will be cancelled if long press triggers
+        break;
+      }
+
+      // Second check: Row border for resize
+      final rowBorder = table.getRowBorderAt(canvasPosForHitTest, tolerance: 6.0);
+      if (rowBorder >= 0) {
+        // Start waiting for long press
+        _isWaitingForResizeLongPress = true;
+        _resizingTableId = table.id;
+        _resizingColumnIndex = -1;
+        _resizingRowIndex = rowBorder;
+        _resizeBorderStartPos = canvasPosForHitTest;
+        _originalRowHeight = table.getRowHeight(rowBorder);
+        setState(() {}); // Trigger repaint to show visual feedback
+        _perfLog('TABLE_ROW_RESIZE_WAITING', inputType: 'row=$rowBorder', pos: canvasPosForHitTest);
+
+        // Start 1 second timer for long press
+        _resizeLongPressTimer?.cancel();
+        _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
+          if (_isWaitingForResizeLongPress && _resizingTableId != null && mounted) {
+            // Long press triggered - activate resize mode
+            _isWaitingForResizeLongPress = false;
+            _isResizingTableBorder = true;
+            _resizeStartY = _resizeBorderStartPos.dy;
+            // Cancel any drawing in progress
+            _currentStroke = null;
+            setState(() {
+              _selectedTableId = _resizingTableId;
+              _lastDeviceKind = 'Table (resize row - active)';
+            });
+            _perfLog('TABLE_ROW_RESIZE_ACTIVATED', inputType: 'row=$_resizingRowIndex', pos: _resizeBorderStartPos);
+          }
+        });
+        _perfLog('TABLE_ROW_RESIZE_TIMER_STARTED', inputType: 'row=$rowBorder', pos: canvasPosForHitTest);
+        // Don't return here - allow drawing to start if threshold not met
+        break;
+      }
+
+      // Third check: Left edge for table drag (lower priority than cell borders)
+      if (table.isOnLeftEdge(canvasPosForHitTest, tolerance: 15.0)) {
+        // Start waiting for long press to drag table
+        _isWaitingForResizeLongPress = true; // Reuse flag for waiting state
+        _resizingTableId = table.id;
+        _resizingColumnIndex = -99; // Special value indicating left edge drag
+        _resizingRowIndex = -1;
+        _resizeBorderStartPos = canvasPosForHitTest;
+        setState(() {}); // Trigger repaint to show visual feedback
+        _perfLog('TABLE_LEFT_EDGE_WAITING', inputType: 'drag', pos: canvasPosForHitTest);
+
+        // Start 1 second timer for long press
+        _resizeLongPressTimer?.cancel();
+        _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
+          if (_isWaitingForResizeLongPress && _resizingTableId != null && _resizingColumnIndex == -99 && mounted) {
+            // Long press triggered on left edge - activate drag mode
+            _isWaitingForResizeLongPress = false;
+            _resizingColumnIndex = -1; // Reset special value
+            // Cancel any drawing in progress
+            _currentStroke = null;
+            // Setup table drag
+            _isDraggingTable = true;
+            _tableDragStart = _resizeBorderStartPos;
+            setState(() {
+              _selectedTableId = _resizingTableId;
+              _lastDeviceKind = 'Table (drag from left edge)';
+            });
+            _perfLog('TABLE_DRAG_FROM_LEFT_EDGE_ACTIVATED', inputType: 'table=${_resizingTableId}', pos: _resizeBorderStartPos);
+          }
+        });
+        // Don't return - allow drawing to start, will be cancelled if long press triggers
+        break;
+      }
+
+      // Fourth check: Top edge for table height resize (resize upward)
+      if (table.isOnTopEdge(canvasPosForHitTest, tolerance: 15.0)) {
+        // Start waiting for long press to resize from top
+        _isWaitingForResizeLongPress = true;
+        _resizingTableId = table.id;
+        _resizingColumnIndex = -1;
+        _resizingRowIndex = -99; // Special value indicating top edge resize
+        _resizeBorderStartPos = canvasPosForHitTest;
+        _originalRowHeight = table.getRowHeight(0); // First row height
+        setState(() {}); // Trigger repaint to show visual feedback
+        _perfLog('TABLE_TOP_EDGE_WAITING', inputType: 'resize', pos: canvasPosForHitTest);
+
+        // Start 1 second timer for long press
+        _resizeLongPressTimer?.cancel();
+        _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
+          if (_isWaitingForResizeLongPress && _resizingTableId != null && _resizingRowIndex == -99 && mounted) {
+            // Long press triggered on top edge - activate resize mode
+            _isWaitingForResizeLongPress = false;
+            _isResizingTableBorder = true;
+            _resizeStartY = _resizeBorderStartPos.dy;
+            // Cancel any drawing in progress
+            _currentStroke = null;
+            setState(() {
+              _selectedTableId = _resizingTableId;
+              _lastDeviceKind = 'Table (resize top edge - active)';
+            });
+            _perfLog('TABLE_TOP_EDGE_RESIZE_ACTIVATED', inputType: 'table=${_resizingTableId}', pos: _resizeBorderStartPos);
+          }
+        });
+        // Don't return - allow drawing to start, will be cancelled if long press triggers
+        break;
+      }
+    }
+
+    // Check for table tap (selection and dragging) - only when NOT drawing
+    // Skip if waiting for resize long press (border resize takes priority)
+    if (!isDrawingOrEraserTool && !_isWaitingForResizeLongPress) {
+      for (int i = _tables.length - 1; i >= 0; i--) {
+        final table = _tables[i];
+        if (table.containsPoint(canvasPosForHitTest)) {
+          // Select the table
+          setState(() {
+            _selectedTableId = table.id;
+            _selectedImageId = null;
+            _selectedTextId = null;
+            _selectedShapeId = null;
+          });
+          widget.onTableSelectionChanged?.call(true);
+          widget.onImageSelectionChanged?.call(false);
+          widget.onShapeSelectionChanged?.call(false);
+
+          // Setup for long press drag (wait before enabling drag)
+          _longPressTimer?.cancel();
+          _elementTapStartTime = DateTime.now().millisecondsSinceEpoch;
+          _elementTapStartPos = canvasPosForHitTest;
+          _pendingDragElementId = table.id;
+          _pendingDragElementType = 'table';
+          _longPressTriggered = false;
+          _tableDragStart = canvasPosForHitTest;
+
+          // 1초 후 롱프레스 트리거 (타이머 사용)
+          _perfLog('TIMER_START', inputType: 'select-table:${table.id}', pos: canvasPosForHitTest);
+          _longPressTimer = Timer(Duration(milliseconds: _longPressDuration), () {
+            _perfLog('TIMER_FIRED', inputType: 'pendingId=$_pendingDragElementId,triggered=$_longPressTriggered', pos: _elementTapStartPos);
+            if (_pendingDragElementId != null && !_longPressTriggered && mounted) {
+              _triggerLongPressDrag();
+            }
+          });
+
+          setState(() {
+            _lastDeviceKind = 'Table (hold to drag)';
+          });
+          return;
+        }
+      }
+    }
+
+    // Clear selections if tapping elsewhere
+    if (_selectedImageId != null || _selectedTextId != null || _selectedShapeId != null || _selectedTableId != null) {
+      setState(() {
+        _selectedImageId = null;
+        _selectedTextId = null;
+        _selectedShapeId = null;
+        _selectedTableId = null;
+      });
+      widget.onImageSelectionChanged?.call(false);
+      widget.onShapeSelectionChanged?.call(false);
+      widget.onTableSelectionChanged?.call(false);
+    }
+
     // Handle eraser tool
     if (widget.drawingTool == DrawingTool.eraser) {
+      _activePointerId = event.pointer; // Set active pointer for eraser tracking
       _saveState();
       final canvasPos = _screenToCanvas(event.localPosition);
       _lastErasePoint = canvasPos;
@@ -717,6 +1331,21 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       setState(() {
         _inputCount++;
         _lastDeviceKind = 'Eraser';
+      });
+      return;
+    }
+
+    // Handle shape tools
+    if (_isShapeTool(widget.drawingTool)) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _log('Shape DOWN at $canvasPos, tool: ${widget.drawingTool}');
+      _activePointerId = event.pointer; // Set active pointer for shape tracking
+      setState(() {
+        _shapeStartPoint = canvasPos;
+        _shapeEndPoint = canvasPos;
+        _isDrawingShape = true;
+        _inputCount++;
+        _lastDeviceKind = 'Shape';
       });
       return;
     }
@@ -755,6 +1384,69 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Create stroke point
     final canvasPos = _screenToCanvas(event.localPosition);
     final point = _createStrokePoint(event, 0, canvasPos);
+
+    // 펜/하이라이터로 표/도형 위에서 롱프레스 시 드래그 모드 준비
+    // (그리기와 동시에 롱프레스 감지)
+    // 단, 테이블 경계선 리사이즈 대기 상태일 때는 건너뜀
+    if ((widget.drawingTool == DrawingTool.pen || widget.drawingTool == DrawingTool.highlighter) && !_isWaitingForResizeLongPress) {
+      // 기존 타이머 취소
+      _longPressTimer?.cancel();
+      _longPressTimer = null;
+
+      _perfLog('PEN_CHECK_TABLES', inputType: 'tables=${_tables.length}', pos: canvasPos);
+
+      // Check if on a table
+      for (int i = _tables.length - 1; i >= 0; i--) {
+        final table = _tables[i];
+        _perfLog('PEN_TABLE_CHECK', inputType: 'bounds=${table.bounds},contains=${table.containsPoint(canvasPos)}', pos: canvasPos);
+        if (table.containsPoint(canvasPos)) {
+          _elementTapStartTime = DateTime.now().millisecondsSinceEpoch;
+          _elementTapStartPos = canvasPos;
+          _pendingDragElementId = table.id;
+          _pendingDragElementType = 'table';
+          _longPressTriggered = false;
+          _tableDragStart = canvasPos;
+          // 펜으로 표 위 롱프레스 시에도 selectedTableId 설정 (드래그 시 필요)
+          _selectedTableId = table.id;
+
+          // 1초 후 롱프레스 트리거 (타이머 사용)
+          _perfLog('TIMER_START', inputType: 'table:${table.id}', pos: canvasPos);
+          _longPressTimer = Timer(Duration(milliseconds: _longPressDuration), () {
+            _perfLog('TIMER_FIRED', inputType: 'pendingId=$_pendingDragElementId,triggered=$_longPressTriggered', pos: _elementTapStartPos);
+            if (_pendingDragElementId != null && !_longPressTriggered && mounted) {
+              _triggerLongPressDrag();
+            }
+          });
+          break;
+        }
+      }
+      // Check if on a shape
+      if (_pendingDragElementId == null) {
+        for (int i = _shapes.length - 1; i >= 0; i--) {
+          final shape = _shapes[i];
+          if (shape.containsPoint(canvasPos)) {
+            _elementTapStartTime = DateTime.now().millisecondsSinceEpoch;
+            _elementTapStartPos = canvasPos;
+            _pendingDragElementId = shape.id;
+            _pendingDragElementType = 'shape';
+            _longPressTriggered = false;
+            _shapeDragStart = canvasPos;
+            // 펜으로 도형 위 롱프레스 시에도 selectedShapeId 설정 (드래그 시 필요)
+            _selectedShapeId = shape.id;
+
+            // 1초 후 롱프레스 트리거 (타이머 사용)
+            _perfLog('TIMER_START', inputType: 'shape:${shape.id}', pos: canvasPos);
+            _longPressTimer = Timer(Duration(milliseconds: _longPressDuration), () {
+              _perfLog('TIMER_FIRED', inputType: 'pendingId=$_pendingDragElementId,triggered=$_longPressTriggered', pos: _elementTapStartPos);
+              if (_pendingDragElementId != null && !_longPressTriggered && mounted) {
+                _triggerLongPressDrag();
+              }
+            });
+            break;
+          }
+        }
+      }
+    }
 
     // Determine color based on tool
     Color strokeColor = widget.strokeColor;
@@ -804,30 +1496,401 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   /// Erase strokes at a point
   void _eraseAt(Offset point) {
-    final eraserRadius = widget.strokeWidth / 2;
+    // 지우개 반경: 최소 20px, strokeWidth의 5배 중 큰 값 사용
+    final eraserRadius = math.max(20.0, widget.strokeWidth * 5);
     final toRemove = <Stroke>[];
 
-    for (final stroke in _strokes) {
-      for (final p in stroke.points) {
-        final distance = (Offset(p.x, p.y) - point).distance;
-        if (distance <= eraserRadius + stroke.width / 2) {
-          toRemove.add(stroke);
-          break;
+    for (int idx = 0; idx < _strokes.length; idx++) {
+      final stroke = _strokes[idx];
+      bool shouldRemove = false;
+
+      // 도형인 경우 특별 처리
+      if (stroke.isShape) {
+        // 원/타원: boundingBox 기준으로 검사
+        if (stroke.shapeType == ShapeType.circle) {
+          // 타원의 중심과 반지름 계산
+          final centerX = (stroke.boundingBox.minX + stroke.boundingBox.maxX) / 2;
+          final centerY = (stroke.boundingBox.minY + stroke.boundingBox.maxY) / 2;
+          final radiusX = (stroke.boundingBox.maxX - stroke.boundingBox.minX) / 2;
+          final radiusY = (stroke.boundingBox.maxY - stroke.boundingBox.minY) / 2;
+
+          // 타원 경계와의 거리 계산 (정규화된 좌표 사용)
+          final dx = (point.dx - centerX) / radiusX;
+          final dy = (point.dy - centerY) / radiusY;
+          final normalizedDist = math.sqrt(dx * dx + dy * dy);
+
+          // 타원 경계선 근처인지 확인 (더 넓은 범위)
+          final threshold = (eraserRadius + stroke.width + 15) / math.min(radiusX, radiusY);
+          if ((normalizedDist - 1.0).abs() <= threshold) {
+            shouldRemove = true;
+          }
+        } else {
+          // 직선, 사각형, 화살표: 선분 기반 검사 (포인트 사이 연결선과의 거리)
+          final hitDistance = eraserRadius + stroke.width / 2 + 10; // 여유 10px 추가
+          for (int i = 0; i < stroke.points.length - 1; i++) {
+            final p1 = Offset(stroke.points[i].x, stroke.points[i].y);
+            final p2 = Offset(stroke.points[i + 1].x, stroke.points[i + 1].y);
+            final distance = _pointToLineDistance(point, p1, p2);
+            if (distance <= hitDistance) {
+              shouldRemove = true;
+              break;
+            }
+          }
         }
+      } else {
+        // 일반 스트로크: 선분 기반 검사 (포인트 사이 연결선과의 거리)
+        final hitDistance = eraserRadius + stroke.width / 2;
+
+        // 포인트가 1개인 경우 (점)
+        if (stroke.points.length == 1) {
+          final p = stroke.points[0];
+          final distance = (Offset(p.x, p.y) - point).distance;
+          if (distance <= hitDistance) {
+            shouldRemove = true;
+          }
+        } else {
+          // 선분 기반 검사
+          for (int i = 0; i < stroke.points.length - 1; i++) {
+            final p1 = Offset(stroke.points[i].x, stroke.points[i].y);
+            final p2 = Offset(stroke.points[i + 1].x, stroke.points[i + 1].y);
+            final distance = _pointToLineDistance(point, p1, p2);
+            if (distance <= hitDistance) {
+              shouldRemove = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (shouldRemove) {
+        toRemove.add(stroke);
       }
     }
 
     if (toRemove.isNotEmpty) {
-      for (final stroke in toRemove) {
-        _strokes.remove(stroke);
-      }
+      setState(() {
+        for (final stroke in toRemove) {
+          _strokes.remove(stroke);
+        }
+      });
       widget.onStrokesChanged?.call(_strokes);
     }
+
+    // Also check CanvasShapes for erasing
+    final shapesToRemove = <CanvasShape>[];
+    for (final shape in _shapes) {
+      if (shape.containsPoint(point, tolerance: eraserRadius + 20)) {
+        shapesToRemove.add(shape);
+      }
+    }
+    if (shapesToRemove.isNotEmpty) {
+      setState(() {
+        for (final shape in shapesToRemove) {
+          _shapes.remove(shape);
+        }
+        // Clear selection if selected shape was erased
+        if (_selectedShapeId != null && shapesToRemove.any((s) => s.id == _selectedShapeId)) {
+          _selectedShapeId = null;
+          widget.onShapeSelectionChanged?.call(false);
+        }
+      });
+      widget.onShapesChanged?.call(_shapes);
+    }
+
+    // Also check CanvasTables for erasing
+    final tablesToRemove = <CanvasTable>[];
+    for (final table in _tables) {
+      if (table.containsPoint(point)) {
+        tablesToRemove.add(table);
+      }
+    }
+    if (tablesToRemove.isNotEmpty) {
+      setState(() {
+        for (final table in tablesToRemove) {
+          _tables.remove(table);
+        }
+        // Clear selection if selected table was erased
+        if (_selectedTableId != null && tablesToRemove.any((t) => t.id == _selectedTableId)) {
+          _selectedTableId = null;
+          widget.onTableSelectionChanged?.call(false);
+        }
+      });
+      widget.onTablesChanged?.call(_tables);
+    }
+  }
+
+  /// 점에서 선분까지의 최단 거리 계산
+  double _pointToLineDistance(Offset point, Offset lineStart, Offset lineEnd) {
+    final dx = lineEnd.dx - lineStart.dx;
+    final dy = lineEnd.dy - lineStart.dy;
+    final lengthSquared = dx * dx + dy * dy;
+
+    if (lengthSquared == 0) {
+      // 선분이 점인 경우
+      return (point - lineStart).distance;
+    }
+
+    // 선분 위 가장 가까운 점의 파라미터 t (0~1 범위로 클램프)
+    var t = ((point.dx - lineStart.dx) * dx + (point.dy - lineStart.dy) * dy) / lengthSquared;
+    t = t.clamp(0.0, 1.0);
+
+    // 선분 위 가장 가까운 점
+    final closestX = lineStart.dx + t * dx;
+    final closestY = lineStart.dy + t * dy;
+
+    return (point - Offset(closestX, closestY)).distance;
   }
 
   void _onPointerMove(PointerMoveEvent event) {
     final moveStartTime = DateTime.now().millisecondsSinceEpoch;
     final isFingerTouch = _isFingerTouch(event);
+
+    // Handle image manipulation first
+    if (_isDraggingImage || _isResizingImage || _isRotatingImage) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      if (_selectedImageId != null && _imageDragStart != null) {
+        final index = _images.indexWhere((img) => img.id == _selectedImageId);
+        if (index != -1) {
+          final image = _images[index];
+
+          if (_isRotatingImage) {
+            // Calculate rotation based on angle from center
+            final center = image.bounds.center;
+            final startAngle = (_imageDragStart! - center).direction;
+            final currentAngle = (canvasPos - center).direction;
+            final newRotation = (_imageRotationStart ?? 0) + (currentAngle - startAngle);
+            setState(() {
+              _images[index] = image.copyWith(rotation: newRotation);
+            });
+          } else if (_isResizingImage) {
+            // Resize from corner
+            final delta = canvasPos - _imageDragStart!;
+            var newBounds = image.bounds;
+
+            switch (_resizeCorner) {
+              case 'br':
+                newBounds = Rect.fromLTRB(
+                  image.bounds.left,
+                  image.bounds.top,
+                  (image.bounds.right + delta.dx).clamp(image.bounds.left + 20, double.infinity),
+                  (image.bounds.bottom + delta.dy).clamp(image.bounds.top + 20, double.infinity),
+                );
+                break;
+              case 'bl':
+                newBounds = Rect.fromLTRB(
+                  (image.bounds.left + delta.dx).clamp(-double.infinity, image.bounds.right - 20),
+                  image.bounds.top,
+                  image.bounds.right,
+                  (image.bounds.bottom + delta.dy).clamp(image.bounds.top + 20, double.infinity),
+                );
+                break;
+              case 'tr':
+                newBounds = Rect.fromLTRB(
+                  image.bounds.left,
+                  (image.bounds.top + delta.dy).clamp(-double.infinity, image.bounds.bottom - 20),
+                  (image.bounds.right + delta.dx).clamp(image.bounds.left + 20, double.infinity),
+                  image.bounds.bottom,
+                );
+                break;
+              case 'tl':
+                newBounds = Rect.fromLTRB(
+                  (image.bounds.left + delta.dx).clamp(-double.infinity, image.bounds.right - 20),
+                  (image.bounds.top + delta.dy).clamp(-double.infinity, image.bounds.bottom - 20),
+                  image.bounds.right,
+                  image.bounds.bottom,
+                );
+                break;
+            }
+
+            setState(() {
+              _images[index] = image.copyWith(
+                position: newBounds.topLeft,
+                size: newBounds.size,
+              );
+            });
+            _imageDragStart = canvasPos;
+          } else if (_isDraggingImage) {
+            // Move image
+            final delta = canvasPos - _imageDragStart!;
+            setState(() {
+              _images[index] = image.copyWith(
+                position: image.position + delta,
+              );
+            });
+            _imageDragStart = canvasPos;
+          }
+          widget.onImagesChanged?.call(_images);
+        }
+      }
+      return;
+    }
+
+    // Check if waiting for resize long press - cancel if moved too much
+    if (_isWaitingForResizeLongPress && _resizingTableId != null) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      final moveDistance = (canvasPos - _resizeBorderStartPos).distance;
+
+      // Cancel long press if moved more than 10px
+      if (moveDistance > 10.0) {
+        _cancelResizeLongPressState(reason: 'moved too much');
+      }
+    }
+
+    // Handle table border resize (after long press activated)
+    if (_isResizingTableBorder && _resizingTableId != null) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      final index = _tables.indexWhere((t) => t.id == _resizingTableId);
+      if (index != -1) {
+        final table = _tables[index];
+        if (_resizingColumnIndex >= 0) {
+          // Resize column width
+          final deltaX = canvasPos.dx - _resizeStartX;
+          final newWidth = (_originalColumnWidth + deltaX).clamp(20.0, 500.0);
+          setState(() {
+            _tables[index] = table.withColumnWidth(_resizingColumnIndex, newWidth);
+          });
+        } else if (_resizingRowIndex >= 0) {
+          // Resize row height
+          final deltaY = canvasPos.dy - _resizeStartY;
+          final newHeight = (_originalRowHeight + deltaY).clamp(15.0, 300.0);
+          setState(() {
+            _tables[index] = table.withRowHeight(_resizingRowIndex, newHeight);
+          });
+        } else if (_resizingRowIndex == -99) {
+          // Resize from top edge: adjust first row height and move table position upward
+          final deltaY = _resizeStartY - canvasPos.dy; // Inverted: moving up increases height
+          final newHeight = (_originalRowHeight + deltaY).clamp(15.0, 300.0);
+          final actualDelta = newHeight - _originalRowHeight;
+          setState(() {
+            // Update row height
+            _tables[index] = table.withRowHeight(0, newHeight).copyWith(
+              // Move table position upward by the height difference
+              position: Offset(table.position.dx, table.position.dy - actualDelta),
+            );
+            // Update start position for continuous resize
+            _resizeStartY = canvasPos.dy;
+            _originalRowHeight = newHeight;
+          });
+        }
+        widget.onTablesChanged?.call(_tables);
+      }
+      return;
+    }
+
+    // Handle text dragging
+    if (_isDraggingText && _selectedTextId != null && _textDragStart != null) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      final index = _texts.indexWhere((t) => t.id == _selectedTextId);
+      if (index != -1) {
+        final text = _texts[index];
+        final delta = canvasPos - _textDragStart!;
+        setState(() {
+          _texts[index] = text.copyWith(position: text.position + delta);
+        });
+        _textDragStart = canvasPos;
+        widget.onTextsChanged?.call(_texts);
+      }
+      return;
+    }
+
+    // Check for long press cancellation (if moved too much or drawing started)
+    if (_pendingDragElementId != null && !_longPressTriggered) {
+      // Check if position moved too much (cancel long press if moved)
+      final canvasPos = _screenToCanvas(event.localPosition);
+      final moveDistance = _elementTapStartPos != null ? (canvasPos - _elementTapStartPos!).distance : 0.0;
+
+      // 펜으로 그리는 중이면 롱프레스 취소 (스트로크 포인트가 2개 이상이면 그리기 시작한 것)
+      final isDrawingStroke = _currentStroke != null && _currentStroke!.points.length >= 2;
+
+      if (moveDistance > 20.0 || isDrawingStroke) {
+        // Moved too much or drawing stroke, cancel pending drag and timer
+        _longPressTimer?.cancel();
+        _longPressTimer = null;
+        _pendingDragElementId = null;
+        _pendingDragElementType = null;
+        _elementTapStartTime = null;
+        _elementTapStartPos = null;
+      }
+    }
+
+    // Handle shape ready-to-drag state → start actual dragging
+    if (_readyToDragShapeId != null && _selectedShapeId != null && _shapeDragStart != null) {
+      // 준비 상태에서 이동하면 실제 드래그 시작
+      setState(() {
+        _isDraggingShape = true;
+        _draggingShapeHandle = null;
+        _readyToDragShapeId = null; // 준비 상태 해제
+        _lastDeviceKind = 'Shape (dragging)';
+      });
+      _perfLog('SHAPE_DRAG_START', inputType: 'from ready state', pos: _shapeDragStart);
+    }
+
+    // Handle shape dragging/editing
+    if (_isDraggingShape && _selectedShapeId != null && _shapeDragStart != null) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _log('Shape dragging MOVE: canvasPos=(${canvasPos.dx.toStringAsFixed(1)}, ${canvasPos.dy.toStringAsFixed(1)}), shapeDragStart=(${_shapeDragStart!.dx.toStringAsFixed(1)}, ${_shapeDragStart!.dy.toStringAsFixed(1)})');
+      final index = _shapes.indexWhere((s) => s.id == _selectedShapeId);
+      if (index != -1) {
+        final shape = _shapes[index];
+        final delta = canvasPos - _shapeDragStart!;
+
+        if (_draggingShapeHandle == null) {
+          // Dragging whole shape
+          setState(() {
+            _shapes[index] = shape.copyWith(
+              startPoint: shape.startPoint + delta,
+              endPoint: shape.endPoint + delta,
+            );
+          });
+        } else if (_draggingShapeHandle == 0) {
+          // Dragging start handle
+          setState(() {
+            _shapes[index] = shape.copyWith(startPoint: canvasPos);
+          });
+        } else if (_draggingShapeHandle == 1) {
+          // Dragging end handle
+          setState(() {
+            _shapes[index] = shape.copyWith(endPoint: canvasPos);
+          });
+        }
+
+        _shapeDragStart = canvasPos;
+        widget.onShapesChanged?.call(_shapes);
+      }
+      return;
+    }
+
+    // Handle table ready-to-drag state → start actual dragging
+    if (_readyToDragTableId != null && _selectedTableId != null && _tableDragStart != null) {
+      // 준비 상태에서 이동하면 실제 드래그 시작
+      setState(() {
+        _isDraggingTable = true;
+        _readyToDragTableId = null; // 준비 상태 해제
+        _lastDeviceKind = 'Table (dragging)';
+      });
+      _perfLog('TABLE_DRAG_START', inputType: 'from ready state', pos: _tableDragStart);
+    }
+
+    // Handle table dragging
+    if (_isDraggingTable && _selectedTableId != null && _tableDragStart != null) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      final delta = canvasPos - _tableDragStart!;
+      _perfLog('TABLE DRAG', inputType: 'delta=(${delta.dx.toStringAsFixed(0)},${delta.dy.toStringAsFixed(0)})', pos: canvasPos);
+      final index = _tables.indexWhere((t) => t.id == _selectedTableId);
+      if (index != -1) {
+        final table = _tables[index];
+
+        setState(() {
+          _tables[index] = table.copyWith(
+            position: table.position + delta,
+          );
+        });
+
+        _tableDragStart = canvasPos;
+        widget.onTablesChanged?.call(_tables);
+      }
+      return;
+    }
 
     // === 올가미 디버그: MOVE 시작 ===
     if (widget.drawingTool == DrawingTool.lasso && _inputCount % 20 == 0) {
@@ -864,11 +1927,27 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
-    // Handle finger gesture (pan/zoom)
-    if (isFingerTouch && _activePointers.containsKey(event.pointer)) {
+    // Handle shape tools - process BEFORE finger gesture check
+    if (_isShapeTool(widget.drawingTool) && _isDrawingShape && event.pointer == _activePointerId) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      setState(() {
+        _shapeEndPoint = canvasPos;
+        _inputCount++;
+      });
+      return;
+    }
+
+    // Handle finger gesture (pan/zoom) - but not if dragging elements
+    // 핀치 줌이 활성화되면 (_isGesturing && _activePointers.length >= 2) 포인터 타입과 무관하게 제스처 처리
+    final isDraggingElement = _isDraggingImage || _isResizingImage || _isRotatingImage ||
+        _isDraggingText || _isDraggingShape || _isDraggingTable;
+    final isActiveGesture = _isGesturing && _activePointers.length >= 2;
+
+    // 활성 제스처 중이면 손가락 터치 체크 무시하고 계속 처리
+    if ((isFingerTouch || isActiveGesture) && _activePointers.containsKey(event.pointer) && !isDraggingElement) {
       _activePointers[event.pointer] = event.localPosition;
 
-      if (_isGesturing && _activePointers.length >= 2) {
+      if (isActiveGesture) {
         final currentFocal = _getGestureFocalPoint();
         final currentSpan = _getGestureSpan();
 
@@ -882,23 +1961,25 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           }
         }
 
-        if (_lastFocalPoint != null && _baseSpan > 0) {
+        if (_lastFocalPoint != null && _baseSpan > 0 && _canvasSize != null) {
           // Calculate scale factor from pinch gesture
-          final scaleFactor = currentSpan / _baseSpan;
-          final newScale = (_baseScale * scaleFactor).clamp(1.0, 1.5);
+          final rawScaleFactor = currentSpan / _baseSpan;
 
-          // Calculate pan delta
-          final delta = currentFocal - _lastFocalPoint!;
+          // Direct scale calculation with clamping (zoom in only: 1.0x ~ 1.5x)
+          final newScale = (_baseScale * rawScaleFactor).clamp(1.0, 1.5);
 
-          // Update scale and offset together for smooth zoom-pan
-          // Zoom toward focal point
-          final focalCanvasPos = (_lastFocalPoint! - _baseOffset) / _baseScale;
-          final newOffset = currentFocal - focalCanvasPos * newScale;
+          // Zoom toward canvas center (용지 중심 기준 확대)
+          final canvasCenter = Offset(_canvasSize!.width / 2, _canvasSize!.height / 2);
+          final canvasCenterInCanvas = (canvasCenter - _baseOffset) / _baseScale;
+          final newOffset = canvasCenter - canvasCenterInCanvas * newScale;
 
           _scale = newScale;
           _offset = newOffset;
 
           _perfLog('PINCH-ZOOM', inputType: 'scale:${_scale.toStringAsFixed(2)}');
+
+          // 외부에 변환 정보 알림
+          widget.onTransformChanged?.call(_scale, _offset);
         }
 
         _lastFocalPoint = currentFocal;
@@ -913,6 +1994,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           _offset += delta;
         });
         _lastFocalPoint = event.localPosition;
+
+        // 외부에 변환 정보 알림
+        widget.onTransformChanged?.call(_scale, _offset);
         // Log every 10th move for finger pan
         if (_inputCount % 10 == 0) {
           _perfLog('FINGER-PAN', inputType: 'TOUCH', pos: event.localPosition);
@@ -949,10 +2033,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     // Handle lasso tool
     if (widget.drawingTool == DrawingTool.lasso) {
-      _log('Lasso MOVE check: pointer=${event.pointer}, activePointerId=$_activePointerId, lassoPath.length=${_lassoPath.length}');
-
       if (event.pointer != _activePointerId) {
-        _log('Lasso MOVE: pointer mismatch, ignoring');
         return;
       }
 
@@ -1038,6 +2119,91 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     final nativeType = _windowsPointerService.getMostRecentPointerType();
     _perfLog('UP start', inputType: nativeType?.name ?? 'unknown', pos: event.localPosition);
 
+    // Handle image/text manipulation end
+    if (_isDraggingImage || _isResizingImage || _isRotatingImage) {
+      _activePointerId = null;
+      _isDraggingImage = false;
+      _isResizingImage = false;
+      _isRotatingImage = false;
+      _imageDragStart = null;
+      _resizeCorner = null;
+      _imageRotationStart = null;
+      return;
+    }
+
+    if (_isDraggingText) {
+      _activePointerId = null;
+      _isDraggingText = false;
+      _textDragStart = null;
+      return;
+    }
+
+    // Handle table border resize end (or long press waiting cleanup)
+    if (_isResizingTableBorder || _isWaitingForResizeLongPress) {
+      _activePointerId = null;
+      final wasActualResize = _isResizingTableBorder;
+      _resizeLongPressTimer?.cancel();
+      _resizeLongPressTimer = null;
+      _isResizingTableBorder = false;
+      _isWaitingForResizeLongPress = false;
+      _resizingTableId = null;
+      _resizingColumnIndex = -1;
+      _resizingRowIndex = -1;
+      _resizeBorderStartPos = Offset.zero;
+      if (wasActualResize) {
+        _perfLog('TABLE_RESIZE_END', inputType: 'resize complete');
+      } else {
+        _perfLog('TABLE_RESIZE_WAITING_END', inputType: 'long press not triggered');
+      }
+      return;
+    }
+
+    // Handle shape dragging end (or ready state end)
+    if (_isDraggingShape || _readyToDragShapeId != null) {
+      _activePointerId = null;
+      _isDraggingShape = false;
+      _readyToDragShapeId = null;
+      _shapeDragStart = null;
+      _draggingShapeHandle = null;
+      // Reset long press state and timer
+      _longPressTimer?.cancel();
+      _longPressTimer = null;
+      _pendingDragElementId = null;
+      _pendingDragElementType = null;
+      _elementTapStartTime = null;
+      _elementTapStartPos = null;
+      _longPressTriggered = false;
+      return;
+    }
+
+    // Handle table dragging end (or ready state end)
+    if (_isDraggingTable || _readyToDragTableId != null) {
+      _activePointerId = null;
+      _isDraggingTable = false;
+      _readyToDragTableId = null;
+      _tableDragStart = null;
+      // Reset long press state and timer
+      _longPressTimer?.cancel();
+      _longPressTimer = null;
+      _pendingDragElementId = null;
+      _pendingDragElementType = null;
+      _elementTapStartTime = null;
+      _elementTapStartPos = null;
+      _longPressTriggered = false;
+      return;
+    }
+
+    // Reset long press state if element was selected but not dragged
+    if (_pendingDragElementId != null) {
+      _longPressTimer?.cancel();
+      _longPressTimer = null;
+      _pendingDragElementId = null;
+      _pendingDragElementType = null;
+      _elementTapStartTime = null;
+      _elementTapStartPos = null;
+      _longPressTriggered = false;
+    }
+
     // Handle finger gesture end
     if (_activePointers.containsKey(event.pointer)) {
       _activePointers.remove(event.pointer);
@@ -1084,6 +2250,61 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _isPenDrawing = false;
       _lastErasePoint = null;
       setState(() {});
+      return;
+    }
+
+    // Handle shape tool end
+    if (_isShapeTool(widget.drawingTool) && _isDrawingShape) {
+      _activePointerId = null;
+      _isPenDrawing = false;
+
+      // Update end point with final UP position
+      final finalEndPoint = _screenToCanvas(event.localPosition);
+
+      if (_shapeStartPoint != null) {
+        // Create editable CanvasShape
+        CanvasShapeType shapeType;
+        switch (widget.drawingTool) {
+          case DrawingTool.shapeLine:
+            shapeType = CanvasShapeType.line;
+            break;
+          case DrawingTool.shapeRectangle:
+            shapeType = CanvasShapeType.rectangle;
+            break;
+          case DrawingTool.shapeCircle:
+            shapeType = CanvasShapeType.circle;
+            break;
+          case DrawingTool.shapeArrow:
+            shapeType = CanvasShapeType.arrow;
+            break;
+          default:
+            shapeType = CanvasShapeType.line;
+        }
+
+        final newShape = CanvasShape(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          type: shapeType,
+          startPoint: _shapeStartPoint!,
+          endPoint: finalEndPoint,
+          color: widget.strokeColor,
+          strokeWidth: widget.strokeWidth,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        );
+
+        _saveState();
+        setState(() {
+          _shapes.add(newShape);
+          _selectedShapeId = newShape.id;
+        });
+        widget.onShapesChanged?.call(_shapes);
+        widget.onShapeSelectionChanged?.call(true);
+      }
+
+      setState(() {
+        _shapeStartPoint = null;
+        _shapeEndPoint = null;
+        _isDrawingShape = false;
+      });
       return;
     }
 
@@ -1206,6 +2427,86 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     );
   }
 
+  /// Check if a drawing tool is a shape tool
+  bool _isShapeTool(DrawingTool tool) {
+    return tool == DrawingTool.shapeLine ||
+        tool == DrawingTool.shapeRectangle ||
+        tool == DrawingTool.shapeCircle ||
+        tool == DrawingTool.shapeArrow;
+  }
+
+  /// Generate stroke points for a shape
+  List<StrokePoint> _generateShapePoints(DrawingTool tool, Offset start, Offset end) {
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    const pressure = 0.5;
+
+    switch (tool) {
+      case DrawingTool.shapeLine:
+        return [
+          StrokePoint(x: start.dx, y: start.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: end.dx, y: end.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+        ];
+
+      case DrawingTool.shapeRectangle:
+        return [
+          StrokePoint(x: start.dx, y: start.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: end.dx, y: start.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: end.dx, y: end.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: start.dx, y: end.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: start.dx, y: start.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+        ];
+
+      case DrawingTool.shapeCircle:
+        final centerX = (start.dx + end.dx) / 2;
+        final centerY = (start.dy + end.dy) / 2;
+        final radiusX = (end.dx - start.dx).abs() / 2;
+        final radiusY = (end.dy - start.dy).abs() / 2;
+        final points = <StrokePoint>[];
+
+        // Generate ellipse points
+        const segments = 36;
+        for (int i = 0; i <= segments; i++) {
+          final angle = (i / segments) * 2 * math.pi;
+          final x = centerX + radiusX * math.cos(angle);
+          final y = centerY + radiusY * math.sin(angle);
+          points.add(StrokePoint(x: x, y: y, pressure: pressure, tilt: 0, timestamp: timestamp));
+        }
+        return points;
+
+      case DrawingTool.shapeArrow:
+        // Arrow with arrowhead - line from start to end + arrowhead at end
+        final dx = end.dx - start.dx;
+        final dy = end.dy - start.dy;
+        final length = math.sqrt(dx * dx + dy * dy);
+        if (length < 10) return [];
+
+        // Arrowhead size (proportional to line length, max 30)
+        final arrowSize = math.min(length * 0.2, 30.0);
+        final angle = math.atan2(dy, dx);
+
+        // Arrowhead points (pointing backwards from end)
+        final arrowAngle1 = angle + math.pi * 0.85;
+        final arrowAngle2 = angle - math.pi * 0.85;
+
+        final arrow1X = end.dx + arrowSize * math.cos(arrowAngle1);
+        final arrow1Y = end.dy + arrowSize * math.sin(arrowAngle1);
+        final arrow2X = end.dx + arrowSize * math.cos(arrowAngle2);
+        final arrow2Y = end.dy + arrowSize * math.sin(arrowAngle2);
+
+        // Draw: start -> end (main line) + arrow1 -> end -> arrow2 (arrowhead)
+        return [
+          StrokePoint(x: start.dx, y: start.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: end.dx, y: end.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: arrow1X, y: arrow1Y, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: end.dx, y: end.dy, pressure: pressure, tilt: 0, timestamp: timestamp),
+          StrokePoint(x: arrow2X, y: arrow2Y, pressure: pressure, tilt: 0, timestamp: timestamp),
+        ];
+
+      default:
+        return [];
+    }
+  }
+
   String _getDeviceKindName(PointerDeviceKind kind) {
     switch (kind) {
       case PointerDeviceKind.touch:
@@ -1224,14 +2525,56 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   void clear() {
-    if (_strokes.isEmpty) return;
+    // Check if there's anything to clear
+    if (_strokes.isEmpty && _images.isEmpty && _texts.isEmpty && _shapes.isEmpty && _tables.isEmpty) {
+      return;
+    }
     _saveState();
     setState(() {
+      // Clear strokes
       _strokes.clear();
       _currentStroke = null;
       _inputCount = 0;
+
+      // Clear images
+      _images.clear();
+      _selectedImageId = null;
+      _isDraggingImage = false;
+      _isResizingImage = false;
+      _isRotatingImage = false;
+
+      // Clear texts
+      _texts.clear();
+      _selectedTextId = null;
+      _isDraggingText = false;
+
+      // Clear shapes
+      _shapes.clear();
+      _selectedShapeId = null;
+      _isDraggingShape = false;
+      _isDrawingShape = false;
+      _shapeStartPoint = null;
+      _shapeEndPoint = null;
+
+      // Clear tables
+      _tables.clear();
+      _selectedTableId = null;
+      _isDraggingTable = false;
+      _isResizingTableBorder = false;
+      _resizingTableId = null;
+
+      // Clear lasso selection
+      _lassoPath.clear();
+      _selectedStrokeIds.clear();
+      _isDraggingSelection = false;
     });
+
+    // Notify all changes
     widget.onStrokesChanged?.call(_strokes);
+    widget.onImagesChanged?.call(_images);
+    widget.onTextsChanged?.call(_texts);
+    widget.onShapesChanged?.call(_shapes);
+    widget.onTablesChanged?.call(_tables);
   }
 
   void undo() {
@@ -1375,16 +2718,55 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     return intersections % 2 == 1;
   }
 
-  /// Check if stroke is inside lasso selection
+  /// Check if stroke is inside lasso selection (with bounding box optimization)
   bool _isStrokeInLasso(Stroke stroke, List<Offset> lasso) {
-    if (stroke.points.isEmpty) return false;
+    if (stroke.points.isEmpty || lasso.length < 3) return false;
 
-    // Check if any point of the stroke is inside the lasso
-    for (final point in stroke.points) {
+    // Calculate lasso bounding box for fast rejection
+    double lassoMinX = double.infinity, lassoMinY = double.infinity;
+    double lassoMaxX = double.negativeInfinity, lassoMaxY = double.negativeInfinity;
+    for (final p in lasso) {
+      if (p.dx < lassoMinX) lassoMinX = p.dx;
+      if (p.dy < lassoMinY) lassoMinY = p.dy;
+      if (p.dx > lassoMaxX) lassoMaxX = p.dx;
+      if (p.dy > lassoMaxY) lassoMaxY = p.dy;
+    }
+
+    // Calculate stroke bounding box
+    double strokeMinX = double.infinity, strokeMinY = double.infinity;
+    double strokeMaxX = double.negativeInfinity, strokeMaxY = double.negativeInfinity;
+    for (final p in stroke.points) {
+      if (p.x < strokeMinX) strokeMinX = p.x;
+      if (p.y < strokeMinY) strokeMinY = p.y;
+      if (p.x > strokeMaxX) strokeMaxX = p.x;
+      if (p.y > strokeMaxY) strokeMaxY = p.y;
+    }
+
+    // Fast rejection: if bounding boxes don't overlap, stroke is outside
+    if (strokeMaxX < lassoMinX || strokeMinX > lassoMaxX ||
+        strokeMaxY < lassoMinY || strokeMinY > lassoMaxY) {
+      return false;
+    }
+
+    // Sample points for large strokes (check every Nth point)
+    final sampleRate = stroke.points.length > 100 ? stroke.points.length ~/ 50 : 1;
+
+    // Check if any sampled point of the stroke is inside the lasso
+    for (int i = 0; i < stroke.points.length; i += sampleRate) {
+      final point = stroke.points[i];
       if (_isPointInLasso(Offset(point.x, point.y), lasso)) {
         return true;
       }
     }
+
+    // If sampling, also check the last point
+    if (sampleRate > 1) {
+      final lastPoint = stroke.points.last;
+      if (_isPointInLasso(Offset(lastPoint.x, lastPoint.y), lasso)) {
+        return true;
+      }
+    }
+
     return false;
   }
 
@@ -1449,6 +2831,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _selectedImageId = canvasImage.id;
     });
     widget.onImagesChanged?.call(_images);
+    widget.onImageSelectionChanged?.call(true);
   }
 
   /// Load images from list (for loading saved notes)
@@ -1468,6 +2851,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _selectedImageId = null;
     });
     widget.onImagesChanged?.call(_images);
+    widget.onImageSelectionChanged?.call(false);
   }
 
   /// Clear image selection
@@ -1475,6 +2859,51 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     setState(() {
       _selectedImageId = null;
     });
+    widget.onImageSelectionChanged?.call(false);
+  }
+
+  /// Update image rotation
+  void updateImageRotation(double rotation) {
+    if (_selectedImageId == null) return;
+
+    final index = _images.indexWhere((img) => img.id == _selectedImageId);
+    if (index == -1) return;
+
+    setState(() {
+      _images[index] = _images[index].copyWith(rotation: rotation);
+    });
+    widget.onImagesChanged?.call(_images);
+  }
+
+  /// Update image opacity
+  void updateImageOpacity(double opacity) {
+    if (_selectedImageId == null) return;
+
+    final index = _images.indexWhere((img) => img.id == _selectedImageId);
+    if (index == -1) return;
+
+    setState(() {
+      _images[index] = _images[index].copyWith(opacity: opacity.clamp(0.1, 1.0));
+    });
+    widget.onImagesChanged?.call(_images);
+  }
+
+  /// Get selected image
+  CanvasImage? get selectedImage {
+    if (_selectedImageId == null) return null;
+    try {
+      return _images.firstWhere((img) => img.id == _selectedImageId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Check if point is on rotation handle
+  bool _isOnRotationHandle(CanvasImage image, Offset point) {
+    final bounds = image.bounds;
+    final center = bounds.center;
+    final rotationHandlePos = Offset(center.dx, bounds.top - 30);
+    return (point - rotationHandlePos).distance < 15;
   }
 
   /// Check if point is on a resize handle
@@ -1534,45 +2963,169 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   /// Edit text content
   void _showTextEditDialog(CanvasText text) {
     final controller = TextEditingController(text: text.text);
+    double fontSize = text.fontSize;
+    bool isBold = text.isBold;
+    bool isItalic = text.isItalic;
+    Color textColor = text.color;
+
+    final colors = [
+      Colors.black,
+      Colors.red,
+      Colors.blue,
+      Colors.green,
+      Colors.orange,
+      Colors.purple,
+    ];
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('텍스트 입력'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLines: 5,
-          decoration: const InputDecoration(
-            hintText: '텍스트를 입력하세요...',
-            border: OutlineInputBorder(),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('텍스트 편집'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Text input
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLines: 5,
+                  style: TextStyle(
+                    fontSize: fontSize,
+                    fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
+                    fontStyle: isItalic ? FontStyle.italic : FontStyle.normal,
+                    color: textColor,
+                  ),
+                  decoration: const InputDecoration(
+                    hintText: '텍스트를 입력하세요...',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Font size slider
+                Row(
+                  children: [
+                    const Icon(Icons.format_size, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Slider(
+                        value: fontSize,
+                        min: 10,
+                        max: 48,
+                        divisions: 19,
+                        label: '${fontSize.toInt()}',
+                        onChanged: (value) {
+                          setDialogState(() => fontSize = value);
+                        },
+                      ),
+                    ),
+                    Text('${fontSize.toInt()}pt'),
+                  ],
+                ),
+
+                // Style buttons
+                Row(
+                  children: [
+                    const Text('스타일: '),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: Icon(Icons.format_bold,
+                        color: isBold ? Colors.blue : Colors.grey),
+                      onPressed: () {
+                        setDialogState(() => isBold = !isBold);
+                      },
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.format_italic,
+                        color: isItalic ? Colors.blue : Colors.grey),
+                      onPressed: () {
+                        setDialogState(() => isItalic = !isItalic);
+                      },
+                    ),
+                  ],
+                ),
+
+                // Color picker
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('색상: '),
+                    const SizedBox(width: 8),
+                    ...colors.map((c) => GestureDetector(
+                      onTap: () => setDialogState(() => textColor = c),
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        margin: const EdgeInsets.only(right: 4),
+                        decoration: BoxDecoration(
+                          color: c,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: textColor == c ? Colors.blue : Colors.grey,
+                            width: textColor == c ? 3 : 1,
+                          ),
+                        ),
+                      ),
+                    )),
+                  ],
+                ),
+              ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                if (controller.text.isEmpty) {
+                  deleteSelectedText();
+                }
+                Navigator.pop(context);
+              },
+              child: const Text('취소'),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              onPressed: () {
+                deleteSelectedText();
+                Navigator.pop(context);
+              },
+              child: const Text('삭제'),
+            ),
+            TextButton(
+              onPressed: () {
+                if (controller.text.isNotEmpty) {
+                  _updateText(text.id, controller.text, fontSize, isBold, isItalic, textColor);
+                } else {
+                  deleteSelectedText();
+                }
+                Navigator.pop(context);
+              },
+              child: const Text('확인'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              // Delete if empty
-              if (controller.text.isEmpty) {
-                deleteSelectedText();
-              }
-              Navigator.pop(context);
-            },
-            child: const Text('취소'),
-          ),
-          TextButton(
-            onPressed: () {
-              if (controller.text.isNotEmpty) {
-                _updateTextContent(text.id, controller.text);
-              } else {
-                deleteSelectedText();
-              }
-              Navigator.pop(context);
-            },
-            child: const Text('확인'),
-          ),
-        ],
       ),
     );
+  }
+
+  /// Update text with all properties
+  void _updateText(String textId, String content, double fontSize, bool isBold, bool isItalic, Color color) {
+    _saveState();
+    setState(() {
+      final index = _texts.indexWhere((t) => t.id == textId);
+      if (index >= 0) {
+        _texts[index] = _texts[index].copyWith(
+          text: content,
+          fontSize: fontSize,
+          isBold: isBold,
+          isItalic: isItalic,
+          color: color,
+        );
+      }
+    });
+    widget.onTextsChanged?.call(_texts);
   }
 
   /// Update text content
@@ -1617,6 +3170,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   /// Get all strokes (for saving)
   List<Stroke> get strokes => List.from(_strokes);
 
+  /// Get all shapes (for saving)
+  List<CanvasShape> get shapes => List.from(_shapes);
+
   /// Load strokes (for loading)
   void loadStrokes(List<Stroke> strokes) {
     _saveState();
@@ -1625,6 +3181,65 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     });
     widget.onStrokesChanged?.call(_strokes);
   }
+
+  /// Load shapes (for loading)
+  void loadShapes(List<CanvasShape> shapes) {
+    setState(() {
+      _shapes = List.from(shapes);
+    });
+    widget.onShapesChanged?.call(_shapes);
+  }
+
+  /// 여러 스트로크를 캔버스에 추가 (표 삽입 등)
+  void addStrokes(List<Stroke> strokes) {
+    if (strokes.isEmpty) return;
+    _saveState();
+    setState(() {
+      _strokes.addAll(strokes);
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Get all tables (for saving)
+  List<CanvasTable> get tables => List.from(_tables);
+
+  /// Load tables (for loading)
+  void loadTables(List<CanvasTable> tables) {
+    setState(() {
+      _tables = List.from(tables);
+    });
+    widget.onTablesChanged?.call(_tables);
+  }
+
+  /// Add a table to canvas
+  void addTable(CanvasTable table) {
+    setState(() {
+      _tables.add(table);
+      _selectedTableId = table.id;
+    });
+    widget.onTablesChanged?.call(_tables);
+    widget.onTableSelectionChanged?.call(true);
+  }
+
+  /// Get selected table
+  CanvasTable? get selectedTable {
+    if (_selectedTableId == null) return null;
+    return _tables.firstWhere(
+      (t) => t.id == _selectedTableId,
+      orElse: () => _tables.first,
+    );
+  }
+
+  /// Delete selected table
+  void deleteSelectedTable() {
+    if (_selectedTableId == null) return;
+    setState(() {
+      _tables.removeWhere((t) => t.id == _selectedTableId);
+      _selectedTableId = null;
+    });
+    widget.onTablesChanged?.call(_tables);
+    widget.onTableSelectionChanged?.call(false);
+  }
 }
 
 /// Lasso overlay painter - draws OUTSIDE RepaintBoundary for immediate updates
@@ -1632,11 +3247,13 @@ class _LassoOverlayPainter extends CustomPainter {
   final List<Offset> lassoPath;
   final double scale;
   final Offset offset;
+  final Color lassoColor;
 
   _LassoOverlayPainter({
     required this.lassoPath,
     required this.scale,
     required this.offset,
+    this.lassoColor = const Color(0xFF2196F3),
   });
 
   @override
@@ -1653,10 +3270,18 @@ class _LassoOverlayPainter extends CustomPainter {
       );
     }).toList();
 
-    // Draw lasso path
+    // Draw lasso path with user-selected color
     final paint = Paint()
-      ..color = Colors.blue.withOpacity(0.6)
-      ..strokeWidth = 2.0
+      ..color = lassoColor.withOpacity(0.8)
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    // White outline for visibility
+    final outlinePaint = Paint()
+      ..color = Colors.white.withOpacity(0.9)
+      ..strokeWidth = 4.0
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
@@ -1667,18 +3292,19 @@ class _LassoOverlayPainter extends CustomPainter {
       for (int i = 1; i < screenPath.length; i++) {
         path.lineTo(screenPath[i].dx, screenPath[i].dy);
       }
+      canvas.drawPath(path, outlinePaint);
       canvas.drawPath(path, paint);
     }
 
     // Draw start point indicator
     final startPaint = Paint()
-      ..color = Colors.blue
+      ..color = lassoColor
       ..style = PaintingStyle.fill;
     canvas.drawCircle(screenPath.first, 5.0, startPaint);
 
     // Draw current point indicator
     final currentPaint = Paint()
-      ..color = Colors.red
+      ..color = lassoColor.withOpacity(0.6)
       ..style = PaintingStyle.fill;
     canvas.drawCircle(screenPath.last, 4.0, currentPaint);
   }
@@ -1687,7 +3313,8 @@ class _LassoOverlayPainter extends CustomPainter {
   bool shouldRepaint(_LassoOverlayPainter oldDelegate) {
     return lassoPath.length != oldDelegate.lassoPath.length ||
         scale != oldDelegate.scale ||
-        offset != oldDelegate.offset;
+        offset != oldDelegate.offset ||
+        lassoColor != oldDelegate.lassoColor;
   }
 }
 
@@ -1844,6 +3471,13 @@ class _StrokePainter extends CustomPainter {
   final Set<String> selectedStrokeIds;
   final Offset selectionOffset;
   final Rect? selectionBounds;
+  final Color lassoColor;
+  // Shape preview
+  final Offset? shapeStartPoint;
+  final Offset? shapeEndPoint;
+  final DrawingTool? shapeTool;
+  final Color shapeColor;
+  final double shapeWidth;
 
   _StrokePainter({
     required this.strokes,
@@ -1854,6 +3488,12 @@ class _StrokePainter extends CustomPainter {
     this.selectedStrokeIds = const {},
     this.selectionOffset = Offset.zero,
     this.selectionBounds,
+    this.lassoColor = const Color(0xFF2196F3),
+    this.shapeStartPoint,
+    this.shapeEndPoint,
+    this.shapeTool,
+    this.shapeColor = Colors.black,
+    this.shapeWidth = 2.0,
   });
 
   @override
@@ -1886,6 +3526,11 @@ class _StrokePainter extends CustomPainter {
       canvas.drawCircle(eraserPosition!, eraserRadius, eraserPaint);
     }
 
+    // Draw shape preview
+    if (shapeTool != null && shapeStartPoint != null && shapeEndPoint != null) {
+      _drawShapePreview(canvas, shapeTool!, shapeStartPoint!, shapeEndPoint!);
+    }
+
     // Draw lasso path - only when selection is complete (selectedStrokeIds.isNotEmpty)
     // During drawing, lasso path is rendered by _LassoOverlayPainter (outside RepaintBoundary)
     if (lassoPath.isNotEmpty && selectedStrokeIds.isNotEmpty) {
@@ -1894,12 +3539,12 @@ class _StrokePainter extends CustomPainter {
 
       // Semi-transparent fill for selected area
       final lassoFillPaint = Paint()
-        ..color = Colors.blue.withOpacity(0.08)
+        ..color = lassoColor.withOpacity(0.08)
         ..style = PaintingStyle.fill;
 
       // Main lasso stroke paint
       final lassoPaint = Paint()
-        ..color = Colors.blue.withOpacity(0.8)
+        ..color = lassoColor.withOpacity(0.8)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.5
         ..strokeCap = StrokeCap.round
@@ -1931,12 +3576,12 @@ class _StrokePainter extends CustomPainter {
     // Draw selection bounding box
     if (selectionBounds != null && selectedStrokeIds.isNotEmpty) {
       final boundsPaint = Paint()
-        ..color = Colors.blue.withOpacity(0.8)
+        ..color = lassoColor.withOpacity(0.8)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5;
 
       final handlePaint = Paint()
-        ..color = Colors.blue
+        ..color = lassoColor
         ..style = PaintingStyle.fill;
 
       canvas.drawRect(selectionBounds!, boundsPaint);
@@ -1952,6 +3597,63 @@ class _StrokePainter extends CustomPainter {
       for (final corner in corners) {
         canvas.drawCircle(corner, handleSize / 2, handlePaint);
       }
+    }
+  }
+
+  /// Draw shape preview while user is dragging
+  void _drawShapePreview(Canvas canvas, DrawingTool tool, Offset start, Offset end) {
+    final paint = Paint()
+      ..color = shapeColor
+      ..strokeWidth = shapeWidth
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    switch (tool) {
+      case DrawingTool.shapeLine:
+        canvas.drawLine(start, end, paint);
+        break;
+
+      case DrawingTool.shapeRectangle:
+        canvas.drawRect(Rect.fromPoints(start, end), paint);
+        break;
+
+      case DrawingTool.shapeCircle:
+        final rect = Rect.fromPoints(start, end);
+        canvas.drawOval(rect, paint);
+        break;
+
+      case DrawingTool.shapeArrow:
+        // Draw main line
+        canvas.drawLine(start, end, paint);
+
+        // Draw arrowhead
+        final dx = end.dx - start.dx;
+        final dy = end.dy - start.dy;
+        final length = math.sqrt(dx * dx + dy * dy);
+        if (length >= 10) {
+          final arrowSize = math.min(length * 0.2, 30.0);
+          final angle = math.atan2(dy, dx);
+
+          final arrowAngle1 = angle + math.pi * 0.85;
+          final arrowAngle2 = angle - math.pi * 0.85;
+
+          final arrow1 = Offset(
+            end.dx + arrowSize * math.cos(arrowAngle1),
+            end.dy + arrowSize * math.sin(arrowAngle1),
+          );
+          final arrow2 = Offset(
+            end.dx + arrowSize * math.cos(arrowAngle2),
+            end.dy + arrowSize * math.sin(arrowAngle2),
+          );
+
+          canvas.drawLine(end, arrow1, paint);
+          canvas.drawLine(end, arrow2, paint);
+        }
+        break;
+
+      default:
+        break;
     }
   }
 
@@ -1987,20 +3689,66 @@ class _StrokePainter extends CustomPainter {
     final avgPressure = (totalPressure / stroke.points.length).clamp(0.1, 1.0);
     paint.strokeWidth = stroke.width * (0.5 + avgPressure * 0.5);
 
-    // Draw quadratic bezier curves for smoothness (simpler than Catmull-Rom)
-    for (int i = 1; i < stroke.points.length; i++) {
-      final p0 = stroke.points[i - 1];
-      final p1 = stroke.points[i];
+    // 도형인 경우 타입에 따라 다르게 그림
+    if (stroke.isShape) {
+      // 원/타원인 경우 drawOval로 직접 그림
+      if (stroke.shapeType == ShapeType.circle) {
+        // 포인트들로부터 bounding rect 계산
+        double minX = double.infinity;
+        double minY = double.infinity;
+        double maxX = double.negativeInfinity;
+        double maxY = double.negativeInfinity;
 
-      if (i < stroke.points.length - 1) {
-        // Use quadratic bezier with midpoint for smooth curves
-        final p2 = stroke.points[i + 1];
-        final midX = (p1.x + p2.x) / 2 + offset.dx;
-        final midY = (p1.y + p2.y) / 2 + offset.dy;
-        path.quadraticBezierTo(p1.x + offset.dx, p1.y + offset.dy, midX, midY);
-      } else {
-        // Last point: just draw line
-        path.lineTo(p1.x + offset.dx, p1.y + offset.dy);
+        for (final p in stroke.points) {
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+        }
+
+        final ovalRect = Rect.fromLTRB(
+          minX + offset.dx,
+          minY + offset.dy,
+          maxX + offset.dx,
+          maxY + offset.dy,
+        );
+
+        // Draw highlight glow for selected strokes
+        if (highlight) {
+          final glowPaint = Paint()
+            ..color = Colors.blue.withOpacity(0.3)
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = paint.strokeWidth + 6;
+          canvas.drawOval(ovalRect, glowPaint);
+        }
+
+        canvas.drawOval(ovalRect, paint);
+        return; // 원은 여기서 종료
+      }
+
+      // 그 외 도형은 직선으로 그림
+      for (int i = 1; i < stroke.points.length; i++) {
+        final p = stroke.points[i];
+        path.lineTo(p.x + offset.dx, p.y + offset.dy);
+      }
+    } else {
+      // Draw quadratic bezier curves for smoothness (simpler than Catmull-Rom)
+      for (int i = 1; i < stroke.points.length; i++) {
+        final p0 = stroke.points[i - 1];
+        final p1 = stroke.points[i];
+
+        if (i < stroke.points.length - 1) {
+          // Use quadratic bezier with midpoint for smooth curves
+          final p2 = stroke.points[i + 1];
+          final midX = (p1.x + p2.x) / 2 + offset.dx;
+          final midY = (p1.y + p2.y) / 2 + offset.dy;
+          path.quadraticBezierTo(p1.x + offset.dx, p1.y + offset.dy, midX, midY);
+        } else {
+          // Last point: just draw line
+          path.lineTo(p1.x + offset.dx, p1.y + offset.dy);
+        }
       }
     }
 
@@ -2031,6 +3779,10 @@ class _StrokePainter extends CustomPainter {
     if (selectedStrokeIds.length != oldDelegate.selectedStrokeIds.length) return true;
     if (selectionOffset != oldDelegate.selectionOffset) return true;
     if (selectionBounds != oldDelegate.selectionBounds) return true;
+    // Shape preview changes
+    if (shapeStartPoint != oldDelegate.shapeStartPoint) return true;
+    if (shapeEndPoint != oldDelegate.shapeEndPoint) return true;
+    if (shapeTool != oldDelegate.shapeTool) return true;
     return false;
   }
 }
@@ -2055,10 +3807,22 @@ class _ImagePainter extends CustomPainter {
 
       final isSelected = canvasImage.id == selectedImageId;
       final bounds = canvasImage.bounds;
+      final center = bounds.center;
 
-      // Draw the image
+      // Save canvas state for rotation
+      canvas.save();
+
+      // Apply rotation around center
+      if (canvasImage.rotation != 0) {
+        canvas.translate(center.dx, center.dy);
+        canvas.rotate(canvasImage.rotation);
+        canvas.translate(-center.dx, -center.dy);
+      }
+
+      // Draw the image with opacity
       final srcRect = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
-      canvas.drawImageRect(image, srcRect, bounds, Paint());
+      final paint = Paint()..color = Color.fromRGBO(255, 255, 255, canvasImage.opacity);
+      canvas.drawImageRect(image, srcRect, bounds, paint);
 
       // Draw selection border if selected
       if (isSelected) {
@@ -2068,7 +3832,7 @@ class _ImagePainter extends CustomPainter {
           ..strokeWidth = 2.0;
         canvas.drawRect(bounds, borderPaint);
 
-        // Draw resize handles
+        // Draw resize handles at corners
         final handlePaint = Paint()
           ..color = Colors.blue
           ..style = PaintingStyle.fill;
@@ -2082,7 +3846,16 @@ class _ImagePainter extends CustomPainter {
           canvas.drawCircle(corner, handleSize / 2 + 2, handleBorderPaint);
           canvas.drawCircle(corner, handleSize / 2, handlePaint);
         }
+
+        // Draw rotation handle at top center
+        final rotationHandlePos = Offset(center.dx, bounds.top - 30);
+        canvas.drawLine(Offset(center.dx, bounds.top), rotationHandlePos,
+          Paint()..color = Colors.blue..strokeWidth = 2);
+        canvas.drawCircle(rotationHandlePos, 8, handleBorderPaint);
+        canvas.drawCircle(rotationHandlePos, 6, Paint()..color = Colors.green);
       }
+
+      canvas.restore();
     }
   }
 
@@ -2091,6 +3864,413 @@ class _ImagePainter extends CustomPainter {
     if (images.length != oldDelegate.images.length) return true;
     if (selectedImageId != oldDelegate.selectedImageId) return true;
     if (loadedImages.length != oldDelegate.loadedImages.length) return true;
+    return false;
+  }
+}
+
+/// Shape painter for rendering editable shapes on canvas
+class _ShapePainter extends CustomPainter {
+  final List<CanvasShape> shapes;
+  final String? selectedShapeId;
+
+  _ShapePainter({
+    required this.shapes,
+    this.selectedShapeId,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final shape in shapes) {
+      final isSelected = shape.id == selectedShapeId;
+      final paint = Paint()
+        ..color = shape.color
+        ..strokeWidth = shape.strokeWidth
+        ..style = shape.isFilled ? PaintingStyle.fill : PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+
+      switch (shape.type) {
+        case CanvasShapeType.line:
+          canvas.drawLine(shape.startPoint, shape.endPoint, paint);
+          break;
+        case CanvasShapeType.rectangle:
+          canvas.drawRect(shape.bounds, paint);
+          break;
+        case CanvasShapeType.circle:
+          final center = shape.center;
+          final radius = (shape.endPoint - shape.startPoint).distance / 2;
+          canvas.drawCircle(center, radius, paint);
+          break;
+        case CanvasShapeType.arrow:
+          _drawArrow(canvas, shape.startPoint, shape.endPoint, paint);
+          break;
+      }
+
+      // Draw selection handles if selected
+      if (isSelected) {
+        final handlePaint = Paint()
+          ..color = Colors.blue
+          ..style = PaintingStyle.fill;
+        final handleBorderPaint = Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.fill;
+
+        // Draw handles at start and end points
+        for (final handle in shape.handles) {
+          canvas.drawCircle(handle, 8, handleBorderPaint);
+          canvas.drawCircle(handle, 6, handlePaint);
+        }
+
+        // Draw selection border
+        final borderPaint = Paint()
+          ..color = Colors.blue.withOpacity(0.3)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1;
+        canvas.drawRect(shape.bounds.inflate(5), borderPaint);
+      }
+    }
+  }
+
+  void _drawArrow(Canvas canvas, Offset start, Offset end, Paint paint) {
+    // Draw line
+    canvas.drawLine(start, end, paint);
+
+    // Draw arrowhead
+    final direction = (end - start);
+    final length = direction.distance;
+    if (length < 10) return;
+
+    final normalized = direction / length;
+    final arrowLength = (length * 0.2).clamp(10.0, 30.0);
+    final arrowWidth = arrowLength * 0.5;
+
+    final perpendicular = Offset(-normalized.dy, normalized.dx);
+    final arrowBase = end - normalized * arrowLength;
+    final arrowLeft = arrowBase + perpendicular * arrowWidth;
+    final arrowRight = arrowBase - perpendicular * arrowWidth;
+
+    final path = Path()
+      ..moveTo(end.dx, end.dy)
+      ..lineTo(arrowLeft.dx, arrowLeft.dy)
+      ..lineTo(arrowRight.dx, arrowRight.dy)
+      ..close();
+
+    canvas.drawPath(path, paint..style = PaintingStyle.fill);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ShapePainter oldDelegate) {
+    if (shapes.length != oldDelegate.shapes.length) return true;
+    if (selectedShapeId != oldDelegate.selectedShapeId) return true;
+    // 도형 위치/크기 변경 감지
+    for (int i = 0; i < shapes.length; i++) {
+      if (shapes[i].startPoint != oldDelegate.shapes[i].startPoint) return true;
+      if (shapes[i].endPoint != oldDelegate.shapes[i].endPoint) return true;
+    }
+    return false;
+  }
+}
+
+/// Table painter for rendering tables on canvas
+class _TablePainter extends CustomPainter {
+  final List<CanvasTable> tables;
+  final String? selectedTableId;
+  final String? readyToDragId; // 드래그 준비 완료 상태 (1초 롱프레스 완료)
+  final String? resizeWaitingTableId; // 리사이즈 대기 중인 테이블 ID
+  final int resizeWaitingColumnIndex; // 리사이즈 대기 중인 컬럼 인덱스 (-1=없음, -99=왼쪽외곽)
+  final int resizeWaitingRowIndex; // 리사이즈 대기 중인 행 인덱스 (-1=없음)
+  final bool isResizeActive; // 리사이즈 활성화 상태 (롱프레스 완료)
+
+  _TablePainter({
+    required this.tables,
+    this.selectedTableId,
+    this.readyToDragId,
+    this.resizeWaitingTableId,
+    this.resizeWaitingColumnIndex = -1,
+    this.resizeWaitingRowIndex = -1,
+    this.isResizeActive = false,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final table in tables) {
+      final isSelected = table.id == selectedTableId;
+
+      // Draw table border
+      final borderPaint = Paint()
+        ..color = table.borderColor
+        ..strokeWidth = table.borderWidth
+        ..style = PaintingStyle.stroke;
+
+      // Draw outer border
+      canvas.drawRect(table.bounds, borderPaint);
+
+      // Draw grid lines (using individual column/row sizes)
+      // Horizontal lines (row borders)
+      for (int i = 1; i < table.rows; i++) {
+        final y = table.getRowY(i);
+        canvas.drawLine(
+          Offset(table.position.dx, y),
+          Offset(table.position.dx + table.width, y),
+          borderPaint,
+        );
+      }
+
+      // Vertical lines (column borders)
+      for (int i = 1; i < table.columns; i++) {
+        final x = table.getColumnX(i);
+        canvas.drawLine(
+          Offset(x, table.position.dy),
+          Offset(x, table.position.dy + table.height),
+          borderPaint,
+        );
+      }
+
+      // Draw cell contents
+      for (int row = 0; row < table.rows; row++) {
+        for (int col = 0; col < table.columns; col++) {
+          final content = table.cellContents[row][col];
+          if (content.isNotEmpty) {
+            final cellBounds = table.getCellBounds(row, col);
+            final textPainter = TextPainter(
+              text: TextSpan(
+                text: content,
+                style: TextStyle(
+                  color: table.borderColor,
+                  fontSize: 12,
+                ),
+              ),
+              textDirection: TextDirection.ltr,
+            );
+            textPainter.layout(maxWidth: cellBounds.width - 4);
+            textPainter.paint(
+              canvas,
+              Offset(cellBounds.left + 2, cellBounds.top + 2),
+            );
+          }
+        }
+      }
+
+      // Draw selection highlight if selected
+      if (isSelected) {
+        final selectionPaint = Paint()
+          ..color = Colors.blue.withOpacity(0.2)
+          ..style = PaintingStyle.fill;
+        canvas.drawRect(table.bounds, selectionPaint);
+
+        final selectionBorderPaint = Paint()
+          ..color = Colors.blue
+          ..strokeWidth = 2
+          ..style = PaintingStyle.stroke;
+        canvas.drawRect(table.bounds, selectionBorderPaint);
+      }
+
+      // 드래그 준비 완료 표시 (1초 롱프레스 완료 시)
+      final isReadyToDrag = table.id == readyToDragId;
+      if (isReadyToDrag) {
+        // 주황색 테두리로 드래그 준비 상태 표시
+        final readyPaint = Paint()
+          ..color = Colors.orange.withOpacity(0.3)
+          ..style = PaintingStyle.fill;
+        canvas.drawRect(table.bounds, readyPaint);
+
+        final readyBorderPaint = Paint()
+          ..color = Colors.orange
+          ..strokeWidth = 3
+          ..style = PaintingStyle.stroke;
+        canvas.drawRect(table.bounds, readyBorderPaint);
+
+        // 이동 아이콘 표시 (표 중앙)
+        final center = table.bounds.center;
+        final iconPaint = Paint()
+          ..color = Colors.orange
+          ..strokeWidth = 2
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round;
+
+        // 십자 화살표 그리기
+        const arrowSize = 15.0;
+        // 상
+        canvas.drawLine(center, Offset(center.dx, center.dy - arrowSize), iconPaint);
+        canvas.drawLine(Offset(center.dx, center.dy - arrowSize), Offset(center.dx - 5, center.dy - arrowSize + 5), iconPaint);
+        canvas.drawLine(Offset(center.dx, center.dy - arrowSize), Offset(center.dx + 5, center.dy - arrowSize + 5), iconPaint);
+        // 하
+        canvas.drawLine(center, Offset(center.dx, center.dy + arrowSize), iconPaint);
+        canvas.drawLine(Offset(center.dx, center.dy + arrowSize), Offset(center.dx - 5, center.dy + arrowSize - 5), iconPaint);
+        canvas.drawLine(Offset(center.dx, center.dy + arrowSize), Offset(center.dx + 5, center.dy + arrowSize - 5), iconPaint);
+        // 좌
+        canvas.drawLine(center, Offset(center.dx - arrowSize, center.dy), iconPaint);
+        canvas.drawLine(Offset(center.dx - arrowSize, center.dy), Offset(center.dx - arrowSize + 5, center.dy - 5), iconPaint);
+        canvas.drawLine(Offset(center.dx - arrowSize, center.dy), Offset(center.dx - arrowSize + 5, center.dy + 5), iconPaint);
+        // 우
+        canvas.drawLine(center, Offset(center.dx + arrowSize, center.dy), iconPaint);
+        canvas.drawLine(Offset(center.dx + arrowSize, center.dy), Offset(center.dx + arrowSize - 5, center.dy - 5), iconPaint);
+        canvas.drawLine(Offset(center.dx + arrowSize, center.dy), Offset(center.dx + arrowSize - 5, center.dy + 5), iconPaint);
+      }
+
+      // 리사이즈 대기/활성화 상태 표시
+      final isResizeWaiting = table.id == resizeWaitingTableId;
+
+      // 왼쪽 외곽 드래그 대기 상태 표시 (col=-99는 왼쪽 외곽 특수 값)
+      if (isResizeWaiting && resizeWaitingColumnIndex == -99) {
+        // 왼쪽 외곽은 주황색으로 표시 (이동 대기)
+        final leftEdgePaint = Paint()
+          ..color = Colors.orange
+          ..strokeWidth = isResizeActive ? 4.0 : 3.0
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round;
+
+        // 왼쪽 경계선 하이라이트
+        canvas.drawLine(
+          Offset(table.position.dx, table.position.dy - 5),
+          Offset(table.position.dx, table.position.dy + table.height + 5),
+          leftEdgePaint,
+        );
+
+        // 이동 아이콘 (좌우 화살표)
+        final centerY = table.position.dy + table.height / 2;
+        final x = table.position.dx;
+        final arrowPaint = Paint()
+          ..color = Colors.orange
+          ..strokeWidth = 2
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round;
+
+        // 좌
+        canvas.drawLine(Offset(x - 8, centerY), Offset(x - 3, centerY), arrowPaint);
+        canvas.drawLine(Offset(x - 8, centerY), Offset(x - 5, centerY - 3), arrowPaint);
+        canvas.drawLine(Offset(x - 8, centerY), Offset(x - 5, centerY + 3), arrowPaint);
+        // 우
+        canvas.drawLine(Offset(x + 3, centerY), Offset(x + 8, centerY), arrowPaint);
+        canvas.drawLine(Offset(x + 8, centerY), Offset(x + 5, centerY - 3), arrowPaint);
+        canvas.drawLine(Offset(x + 8, centerY), Offset(x + 5, centerY + 3), arrowPaint);
+      }
+
+      // 위쪽 외곽 리사이즈 대기 상태 표시 (row=-99는 위쪽 외곽 특수 값)
+      if (isResizeWaiting && resizeWaitingRowIndex == -99) {
+        // 위쪽 외곽은 주황색으로 표시 (첫 번째 행 리사이즈)
+        final topEdgePaint = Paint()
+          ..color = Colors.orange
+          ..strokeWidth = isResizeActive ? 4.0 : 3.0
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round;
+
+        // 위쪽 경계선 하이라이트
+        canvas.drawLine(
+          Offset(table.position.dx - 5, table.position.dy),
+          Offset(table.position.dx + table.width + 5, table.position.dy),
+          topEdgePaint,
+        );
+
+        // 리사이즈 아이콘 (상하 화살표)
+        final centerX = table.position.dx + table.width / 2;
+        final y = table.position.dy;
+        final arrowPaint = Paint()
+          ..color = Colors.orange
+          ..strokeWidth = 2
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round;
+
+        // 상
+        canvas.drawLine(Offset(centerX, y - 8), Offset(centerX, y - 3), arrowPaint);
+        canvas.drawLine(Offset(centerX, y - 8), Offset(centerX - 3, y - 5), arrowPaint);
+        canvas.drawLine(Offset(centerX, y - 8), Offset(centerX + 3, y - 5), arrowPaint);
+        // 하
+        canvas.drawLine(Offset(centerX, y + 3), Offset(centerX, y + 8), arrowPaint);
+        canvas.drawLine(Offset(centerX, y + 8), Offset(centerX - 3, y + 5), arrowPaint);
+        canvas.drawLine(Offset(centerX, y + 8), Offset(centerX + 3, y + 5), arrowPaint);
+      }
+
+      if (isResizeWaiting && (resizeWaitingColumnIndex >= 0 || resizeWaitingRowIndex >= 0)) {
+        // 첫 번째 경계선 여부 판단 (왼쪽에서 첫 번째, 위에서 첫 번째)
+        // col=0: 첫 번째 컬럼의 오른쪽 경계선 (왼쪽에서 가장 가까운 내부 경계선)
+        // row=0: 첫 번째 행의 아래쪽 경계선 (위에서 가장 가까운 내부 경계선)
+        final isFirstBorder =
+            (resizeWaitingColumnIndex == 0) ||
+            (resizeWaitingRowIndex == 0);
+
+        // 첫 번째 경계선(왼쪽/위쪽에 가까운)은 주황색, 나머지는 파란색
+        final borderColor = isFirstBorder ? Colors.orange : Colors.blue;
+        final borderWidth = isResizeActive ? 4.0 : 3.0;
+
+        final resizePaint = Paint()
+          ..color = borderColor
+          ..strokeWidth = borderWidth
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round;
+
+        if (resizeWaitingColumnIndex >= 0) {
+          // 컬럼 경계선 하이라이트
+          final x = table.getColumnX(resizeWaitingColumnIndex + 1);
+          canvas.drawLine(
+            Offset(x, table.position.dy - 5),
+            Offset(x, table.position.dy + table.height + 5),
+            resizePaint,
+          );
+
+          // 리사이즈 아이콘 (좌우 화살표)
+          final centerY = table.position.dy + table.height / 2;
+          final arrowPaint = Paint()
+            ..color = borderColor
+            ..strokeWidth = 2
+            ..style = PaintingStyle.stroke
+            ..strokeCap = StrokeCap.round;
+
+          // 좌
+          canvas.drawLine(Offset(x - 8, centerY), Offset(x - 3, centerY), arrowPaint);
+          canvas.drawLine(Offset(x - 8, centerY), Offset(x - 5, centerY - 3), arrowPaint);
+          canvas.drawLine(Offset(x - 8, centerY), Offset(x - 5, centerY + 3), arrowPaint);
+          // 우
+          canvas.drawLine(Offset(x + 3, centerY), Offset(x + 8, centerY), arrowPaint);
+          canvas.drawLine(Offset(x + 8, centerY), Offset(x + 5, centerY - 3), arrowPaint);
+          canvas.drawLine(Offset(x + 8, centerY), Offset(x + 5, centerY + 3), arrowPaint);
+        }
+
+        if (resizeWaitingRowIndex >= 0) {
+          // 행 경계선 하이라이트
+          final y = table.getRowY(resizeWaitingRowIndex + 1);
+          canvas.drawLine(
+            Offset(table.position.dx - 5, y),
+            Offset(table.position.dx + table.width + 5, y),
+            resizePaint,
+          );
+
+          // 리사이즈 아이콘 (상하 화살표)
+          final centerX = table.position.dx + table.width / 2;
+          final arrowPaint = Paint()
+            ..color = borderColor
+            ..strokeWidth = 2
+            ..style = PaintingStyle.stroke
+            ..strokeCap = StrokeCap.round;
+
+          // 상
+          canvas.drawLine(Offset(centerX, y - 8), Offset(centerX, y - 3), arrowPaint);
+          canvas.drawLine(Offset(centerX, y - 8), Offset(centerX - 3, y - 5), arrowPaint);
+          canvas.drawLine(Offset(centerX, y - 8), Offset(centerX + 3, y - 5), arrowPaint);
+          // 하
+          canvas.drawLine(Offset(centerX, y + 3), Offset(centerX, y + 8), arrowPaint);
+          canvas.drawLine(Offset(centerX, y + 8), Offset(centerX - 3, y + 5), arrowPaint);
+          canvas.drawLine(Offset(centerX, y + 8), Offset(centerX + 3, y + 5), arrowPaint);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _TablePainter oldDelegate) {
+    if (tables.length != oldDelegate.tables.length) return true;
+    if (selectedTableId != oldDelegate.selectedTableId) return true;
+    if (readyToDragId != oldDelegate.readyToDragId) return true;
+    if (resizeWaitingTableId != oldDelegate.resizeWaitingTableId) return true;
+    if (resizeWaitingColumnIndex != oldDelegate.resizeWaitingColumnIndex) return true;
+    if (resizeWaitingRowIndex != oldDelegate.resizeWaitingRowIndex) return true;
+    if (isResizeActive != oldDelegate.isResizeActive) return true;
+    // 표 위치/크기 변경 감지
+    for (int i = 0; i < tables.length; i++) {
+      if (tables[i].position != oldDelegate.tables[i].position) return true;
+      if (tables[i].rows != oldDelegate.tables[i].rows) return true;
+      if (tables[i].columns != oldDelegate.tables[i].columns) return true;
+    }
     return false;
   }
 }

@@ -4,6 +4,10 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../core/services/note_storage_service.dart';
 import '../../../core/services/pdf_export_service.dart';
+import '../../../core/services/backup_service.dart';
+import '../../../core/services/settings_service.dart';
+import '../../../core/providers/theme_provider.dart';
+import '../../../core/providers/drawing_state.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -16,10 +20,36 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   // Default settings
   double _defaultPenWidth = 2.0;
   Color _defaultPenColor = Colors.black;
+  Color _lassoColor = const Color(0xFF2196F3); // Blue
   bool _autoSaveEnabled = true;
   int _autoSaveDelay = 3;
   bool _showDebugOverlay = false;
   String _defaultTemplate = '빈 페이지';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final settings = SettingsService.instance;
+    setState(() {
+      _defaultPenWidth = settings.defaultPenWidth;
+      _lassoColor = settings.lassoColor;
+      _autoSaveEnabled = settings.autoSaveEnabled;
+      _autoSaveDelay = settings.autoSaveDelay;
+      _defaultTemplate = _templateToString(settings.defaultTemplate);
+    });
+  }
+
+  String _templateToString(dynamic template) {
+    if (template.toString().contains('blank')) return '빈 페이지';
+    if (template.toString().contains('lined')) return '줄 노트';
+    if (template.toString().contains('grid')) return '격자 노트';
+    if (template.toString().contains('dotted')) return '점 노트';
+    return '빈 페이지';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,8 +77,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 max: 10.0,
                 divisions: 19,
                 label: _defaultPenWidth.toStringAsFixed(1),
-                onChanged: (value) {
+                onChanged: (value) async {
                   setState(() => _defaultPenWidth = value);
+                  await SettingsService.instance.setDefaultPenWidth(value);
                 },
               ),
             ),
@@ -63,6 +94,23 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 height: 32,
                 decoration: BoxDecoration(
                   color: _defaultPenColor,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.grey[300]!),
+                ),
+              ),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.gesture),
+            title: const Text('올가미 선 색상'),
+            subtitle: const Text('영역 선택 시 표시되는 선 색상'),
+            trailing: GestureDetector(
+              onTap: _showLassoColorPicker,
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: _lassoColor,
                   shape: BoxShape.circle,
                   border: Border.all(color: Colors.grey[300]!),
                 ),
@@ -91,8 +139,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             title: const Text('자동 저장'),
             subtitle: Text(_autoSaveEnabled ? '${_autoSaveDelay}초 후 자동 저장' : '꺼짐'),
             value: _autoSaveEnabled,
-            onChanged: (value) {
+            onChanged: (value) async {
               setState(() => _autoSaveEnabled = value);
+              await SettingsService.instance.setAutoSaveEnabled(value);
             },
           ),
           if (_autoSaveEnabled)
@@ -108,12 +157,19 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   max: 10,
                   divisions: 9,
                   label: '$_autoSaveDelay초',
-                  onChanged: (value) {
+                  onChanged: (value) async {
                     setState(() => _autoSaveDelay = value.toInt());
+                    await SettingsService.instance.setAutoSaveDelay(value.toInt());
                   },
                 ),
               ),
             ),
+
+          const Divider(),
+
+          // Display Settings Section
+          _buildSectionHeader('화면'),
+          _buildThemeSelector(),
 
           const Divider(),
 
@@ -132,6 +188,65 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             subtitle: const Text('문서/Winote/exports'),
             trailing: const Icon(Icons.folder_open),
             onTap: _openExportsFolder,
+          ),
+
+          const Divider(),
+
+          // Backup Section
+          _buildSectionHeader('백업'),
+          ListTile(
+            leading: const Icon(Icons.backup),
+            title: const Text('백업 만들기'),
+            subtitle: const Text('모든 노트와 폴더를 백업'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _createBackup,
+          ),
+          ListTile(
+            leading: const Icon(Icons.restore),
+            title: const Text('백업 복원'),
+            subtitle: const Text('백업에서 노트 복원'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _showBackupList,
+          ),
+          ListTile(
+            leading: const Icon(Icons.folder_special),
+            title: const Text('백업 폴더'),
+            subtitle: const Text('문서/Winote/backups'),
+            trailing: const Icon(Icons.folder_open),
+            onTap: _openBackupFolder,
+          ),
+
+          const Divider(),
+
+          // External Backup Section
+          _buildSectionHeader('외부 백업/공유'),
+          ListTile(
+            leading: const Icon(Icons.save_alt),
+            title: const Text('백업 내보내기'),
+            subtitle: const Text('원하는 위치에 백업 저장'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _exportBackupToExternal,
+          ),
+          ListTile(
+            leading: const Icon(Icons.file_upload),
+            title: const Text('백업 가져오기'),
+            subtitle: const Text('외부 파일에서 복원'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _importBackupFromExternal,
+          ),
+          ListTile(
+            leading: const Icon(Icons.share),
+            title: const Text('백업 공유'),
+            subtitle: const Text('다른 앱으로 백업 공유'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _shareBackup,
+          ),
+          ListTile(
+            leading: const Icon(Icons.note_add),
+            title: const Text('노트 가져오기'),
+            subtitle: const Text('.wnote 파일 가져오기'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _importNote,
           ),
 
           const Divider(),
@@ -193,6 +308,83 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
+  Widget _buildThemeSelector() {
+    final themeMode = ref.watch(themeModeProvider);
+
+    String themeName;
+    IconData themeIcon;
+    switch (themeMode) {
+      case ThemeMode.light:
+        themeName = '라이트 모드';
+        themeIcon = Icons.light_mode;
+        break;
+      case ThemeMode.dark:
+        themeName = '다크 모드';
+        themeIcon = Icons.dark_mode;
+        break;
+      default:
+        themeName = '시스템 설정';
+        themeIcon = Icons.brightness_auto;
+    }
+
+    return ListTile(
+      leading: Icon(themeIcon),
+      title: const Text('테마'),
+      subtitle: Text(themeName),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: _showThemeDialog,
+    );
+  }
+
+  void _showThemeDialog() {
+    final themeMode = ref.read(themeModeProvider);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('테마 선택'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RadioListTile<ThemeMode>(
+              title: const Text('시스템 설정'),
+              subtitle: const Text('기기 설정에 따라 자동 변경'),
+              secondary: const Icon(Icons.brightness_auto),
+              value: ThemeMode.system,
+              groupValue: themeMode,
+              onChanged: (value) {
+                ref.read(themeModeProvider.notifier).setThemeMode(value!);
+                Navigator.pop(context);
+              },
+            ),
+            RadioListTile<ThemeMode>(
+              title: const Text('라이트 모드'),
+              subtitle: const Text('밝은 테마'),
+              secondary: const Icon(Icons.light_mode),
+              value: ThemeMode.light,
+              groupValue: themeMode,
+              onChanged: (value) {
+                ref.read(themeModeProvider.notifier).setThemeMode(value!);
+                Navigator.pop(context);
+              },
+            ),
+            RadioListTile<ThemeMode>(
+              title: const Text('다크 모드'),
+              subtitle: const Text('어두운 테마 (눈 보호)'),
+              secondary: const Icon(Icons.dark_mode),
+              value: ThemeMode.dark,
+              groupValue: themeMode,
+              onChanged: (value) {
+                ref.read(themeModeProvider.notifier).setThemeMode(value!);
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showColorPicker() {
     final colors = [
       Colors.black,
@@ -248,6 +440,71 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
+  void _showLassoColorPicker() {
+    final colors = [
+      const Color(0xFF2196F3), // Blue (default)
+      const Color(0xFFE91E63), // Pink
+      const Color(0xFF9C27B0), // Purple
+      const Color(0xFF00BCD4), // Cyan
+      const Color(0xFF4CAF50), // Green
+      const Color(0xFFFF9800), // Orange
+      const Color(0xFFF44336), // Red
+      const Color(0xFF607D8B), // Blue Grey
+      Colors.black,
+      const Color(0xFF795548), // Brown
+    ];
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('올가미 선 색상'),
+        content: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: colors.map((color) {
+            final isSelected = color.value == _lassoColor.value;
+            return GestureDetector(
+              onTap: () async {
+                setState(() => _lassoColor = color);
+                await SettingsService.instance.setLassoColor(color);
+                if (mounted) Navigator.pop(context);
+              },
+              child: Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: isSelected ? Colors.white : Colors.grey[300]!,
+                    width: isSelected ? 3 : 1,
+                  ),
+                  boxShadow: isSelected
+                      ? [
+                          BoxShadow(
+                            color: color.withOpacity(0.5),
+                            blurRadius: 8,
+                            spreadRadius: 2,
+                          )
+                        ]
+                      : null,
+                ),
+                child: isSelected
+                    ? Icon(
+                        Icons.check,
+                        color: color.computeLuminance() > 0.5
+                            ? Colors.black
+                            : Colors.white,
+                      )
+                    : null,
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
   void _showTemplateOptions() {
     final templates = ['빈 페이지', '줄 노트', '격자 노트', '점 노트'];
 
@@ -262,15 +519,33 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               title: Text(template),
               value: template,
               groupValue: _defaultTemplate,
-              onChanged: (value) {
+              onChanged: (value) async {
                 setState(() => _defaultTemplate = value!);
                 Navigator.pop(context);
+                // Save to settings
+                final pageTemplate = _stringToTemplate(value!);
+                await SettingsService.instance.setDefaultTemplate(pageTemplate);
               },
             );
           }).toList(),
         ),
       ),
     );
+  }
+
+  dynamic _stringToTemplate(String name) {
+    switch (name) {
+      case '빈 페이지':
+        return PageTemplate.blank;
+      case '줄 노트':
+        return PageTemplate.lined;
+      case '격자 노트':
+        return PageTemplate.grid;
+      case '점 노트':
+        return PageTemplate.dotted;
+      default:
+        return PageTemplate.blank;
+    }
   }
 
   Future<void> _openNotesFolder() async {
@@ -288,6 +563,261 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final uri = Uri.file(dir);
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
+    }
+  }
+
+  Future<void> _openBackupFolder() async {
+    final backupService = BackupService.instance;
+    final dir = await backupService.getBackupDirectory();
+    final uri = Uri.file(dir);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
+    }
+  }
+
+  Future<void> _createBackup() async {
+    // Show loading
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('백업 생성 중...'),
+          ],
+        ),
+      ),
+    );
+
+    final backupService = BackupService.instance;
+    final filePath = await backupService.createBackup();
+
+    if (mounted) Navigator.pop(context);
+
+    if (filePath != null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('백업 완료: ${filePath.split('/').last}'),
+            action: SnackBarAction(
+              label: '폴더 열기',
+              onPressed: _openBackupFolder,
+            ),
+          ),
+        );
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('백업할 데이터가 없거나 백업에 실패했습니다')),
+        );
+      }
+    }
+  }
+
+  Future<void> _showBackupList() async {
+    final backupService = BackupService.instance;
+    final backups = await backupService.listBackups();
+
+    if (!mounted) return;
+
+    if (backups.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('저장된 백업이 없습니다')),
+      );
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.3,
+        expand: false,
+        builder: (context, scrollController) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  const Icon(Icons.restore),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '백업 목록',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView.builder(
+                controller: scrollController,
+                itemCount: backups.length,
+                itemBuilder: (context, index) {
+                  final backup = backups[index];
+                  return ListTile(
+                    leading: const Icon(Icons.archive),
+                    title: Text(backup.fileName),
+                    subtitle: Text(
+                      '${_formatBackupDate(backup.createdAt)} • '
+                      '노트 ${backup.noteCount}개, 폴더 ${backup.folderCount}개 • '
+                      '${backupService.formatFileSize(backup.fileSize)}',
+                    ),
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (action) async {
+                        if (action == 'restore') {
+                          Navigator.pop(context);
+                          await _restoreBackup(backup);
+                        } else if (action == 'delete') {
+                          await _deleteBackup(backup);
+                        }
+                      },
+                      itemBuilder: (context) => [
+                        const PopupMenuItem(
+                          value: 'restore',
+                          child: Row(
+                            children: [
+                              Icon(Icons.restore),
+                              SizedBox(width: 8),
+                              Text('복원'),
+                            ],
+                          ),
+                        ),
+                        const PopupMenuItem(
+                          value: 'delete',
+                          child: Row(
+                            children: [
+                              Icon(Icons.delete, color: Colors.red),
+                              SizedBox(width: 8),
+                              Text('삭제', style: TextStyle(color: Colors.red)),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _restoreBackup(backup);
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatBackupDate(DateTime date) {
+    final now = DateTime.now();
+    final diff = now.difference(date);
+
+    if (diff.inDays == 0) {
+      return '오늘 ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+    } else if (diff.inDays == 1) {
+      return '어제';
+    } else if (diff.inDays < 7) {
+      return '${diff.inDays}일 전';
+    } else {
+      return '${date.month}/${date.day}';
+    }
+  }
+
+  Future<void> _restoreBackup(BackupInfo backup) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('백업 복원'),
+        content: Text(
+          '이 백업을 복원하시겠습니까?\n\n'
+          '${backup.fileName}\n'
+          '노트 ${backup.noteCount}개, 폴더 ${backup.folderCount}개\n\n'
+          '기존 노트와 중복되는 경우 덮어씁니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('복원'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    // Show loading
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('복원 중...'),
+          ],
+        ),
+      ),
+    );
+
+    final backupService = BackupService.instance;
+    final result = await backupService.restoreBackup(backup.filePath);
+
+    if (mounted) Navigator.pop(context);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result.message)),
+      );
+    }
+  }
+
+  Future<void> _deleteBackup(BackupInfo backup) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('백업 삭제'),
+        content: Text('${backup.fileName}을(를) 삭제하시겠습니까?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('삭제', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    final backupService = BackupService.instance;
+    final deleted = await backupService.deleteBackup(backup.filePath);
+
+    if (mounted) {
+      Navigator.pop(context); // Close bottom sheet
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(deleted ? '백업이 삭제되었습니다' : '백업 삭제 실패'),
+        ),
+      );
     }
   }
 
@@ -360,6 +890,96 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${notes.length}개의 노트가 삭제되었습니다')),
       );
+    }
+  }
+
+  Future<void> _exportBackupToExternal() async {
+    // Show loading
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('백업 내보내기 중...'),
+          ],
+        ),
+      ),
+    );
+
+    final backupService = BackupService.instance;
+    final result = await backupService.exportBackupToExternal();
+
+    if (mounted) Navigator.pop(context);
+
+    if (mounted) {
+      if (result != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('백업 내보내기 완료: ${result.split('\\').last}')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('백업 내보내기가 취소되었거나 실패했습니다')),
+        );
+      }
+    }
+  }
+
+  Future<void> _importBackupFromExternal() async {
+    final backupService = BackupService.instance;
+    final result = await backupService.importBackupFromExternal();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result.message)),
+      );
+    }
+  }
+
+  Future<void> _shareBackup() async {
+    // Show loading
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('공유 준비 중...'),
+          ],
+        ),
+      ),
+    );
+
+    final backupService = BackupService.instance;
+    final success = await backupService.shareBackup(null);
+
+    if (mounted) Navigator.pop(context);
+
+    if (mounted && !success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('공유할 데이터가 없거나 공유에 실패했습니다')),
+      );
+    }
+  }
+
+  Future<void> _importNote() async {
+    final backupService = BackupService.instance;
+    final note = await backupService.importNote();
+
+    if (mounted) {
+      if (note != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('노트 가져오기 완료: ${note.title}')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('노트 가져오기가 취소되었거나 실패했습니다')),
+        );
+      }
     }
   }
 }

@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
-import '../../../core/providers/drawing_state.dart';
 
-/// Drawing toolbar widget with tool selection, color picker, and stroke width
+/// Drawing toolbar widget with color picker, stroke width, and global actions
+/// (도구 선택은 QuickToolbar에서 담당)
 class DrawingToolbar extends StatelessWidget {
-  final DrawingTool currentTool;
   final Color currentColor;
   final double currentWidth;
   final bool canUndo;
@@ -11,13 +10,11 @@ class DrawingToolbar extends StatelessWidget {
   final VoidCallback? onUndo;
   final VoidCallback? onRedo;
   final VoidCallback? onClear;
-  final ValueChanged<DrawingTool> onToolChanged;
   final ValueChanged<Color> onColorChanged;
   final ValueChanged<double> onWidthChanged;
 
   const DrawingToolbar({
     super.key,
-    required this.currentTool,
     required this.currentColor,
     required this.currentWidth,
     this.canUndo = false,
@@ -25,7 +22,6 @@ class DrawingToolbar extends StatelessWidget {
     this.onUndo,
     this.onRedo,
     this.onClear,
-    required this.onToolChanged,
     required this.onColorChanged,
     required this.onWidthChanged,
   });
@@ -58,14 +54,6 @@ class DrawingToolbar extends StatelessWidget {
               onPressed: canRedo ? onRedo : null,
               tooltip: 'Redo',
             ),
-            const SizedBox(width: 8),
-            Container(width: 1, height: 24, color: Colors.grey[300]),
-            const SizedBox(width: 8),
-
-            // Tool selection
-            _buildToolButton(DrawingTool.pen, Icons.edit),
-            _buildToolButton(DrawingTool.highlighter, Icons.highlight),
-            _buildToolButton(DrawingTool.eraser, Icons.auto_fix_normal),
             const SizedBox(width: 8),
             Container(width: 1, height: 24, color: Colors.grey[300]),
             const SizedBox(width: 8),
@@ -107,26 +95,6 @@ class DrawingToolbar extends StatelessWidget {
         onPressed: onPressed,
         padding: const EdgeInsets.all(8),
         constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-      ),
-    );
-  }
-
-  Widget _buildToolButton(DrawingTool tool, IconData icon) {
-    final isSelected = currentTool == tool;
-    return Tooltip(
-      message: tool.name[0].toUpperCase() + tool.name.substring(1),
-      child: Container(
-        decoration: BoxDecoration(
-          color: isSelected ? Colors.blue[100] : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: IconButton(
-          icon: Icon(icon, size: 22),
-          color: isSelected ? Colors.blue[700] : Colors.grey[700],
-          onPressed: () => onToolChanged(tool),
-          padding: const EdgeInsets.all(8),
-          constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-        ),
       ),
     );
   }

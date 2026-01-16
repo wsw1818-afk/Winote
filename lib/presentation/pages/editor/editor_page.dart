@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,13 +8,21 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import '../../../domain/entities/stroke.dart';
+import '../../../domain/entities/stroke_point.dart';
+import '../../../domain/entities/canvas_shape.dart';
+import '../../../domain/entities/canvas_table.dart';
 import '../../../core/providers/drawing_state.dart';
 import '../../../core/services/note_storage_service.dart';
 import '../../../core/services/pdf_export_service.dart';
+import '../../../core/services/image_export_service.dart';
 import '../../../core/services/stroke_smoothing_service.dart';
+import '../../../core/services/settings_service.dart';
+import '../../../core/services/backup_service.dart';
 import '../../widgets/canvas/drawing_canvas.dart';
 import '../../widgets/toolbar/drawing_toolbar.dart';
 import '../../widgets/toolbar/quick_toolbar.dart';
+import '../../widgets/toolbar/image_edit_toolbar.dart';
+import '../settings/settings_page.dart';
 
 class EditorPage extends ConsumerStatefulWidget {
   final String noteId;
@@ -48,14 +57,73 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   // Stroke smoothing
   SmoothingLevel _smoothingLevel = SmoothingLevel.medium;
 
+  // Lasso color (from settings)
+  Color _lassoColor = const Color(0xFF2196F3);
+
   // Track undo/redo state
   bool _canUndo = false;
   bool _canRedo = false;
 
+  // Auto-save
+  Timer? _autoSaveTimer;
+  bool _autoSaveEnabled = true;
+  int _autoSaveDelay = 3; // seconds
+
+  // Image editing state
+  bool _showImageEditToolbar = false;
+
   @override
   void initState() {
     super.initState();
+    _loadSettings();
     _loadNote();
+  }
+
+  @override
+  void dispose() {
+    _autoSaveTimer?.cancel();
+    super.dispose();
+  }
+
+  void _loadSettings() {
+    final settings = SettingsService.instance;
+    _autoSaveEnabled = settings.autoSaveEnabled;
+    _autoSaveDelay = settings.autoSaveDelay;
+    _currentWidth = settings.defaultPenWidth;
+    _currentTemplate = settings.defaultTemplate;
+    _lassoColor = settings.lassoColor;
+  }
+
+  void _scheduleAutoSave() {
+    if (!_autoSaveEnabled) return;
+
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = Timer(Duration(seconds: _autoSaveDelay), () {
+      if (_hasChanges && _currentNote != null) {
+        _autoSave();
+      }
+    });
+  }
+
+  Future<void> _autoSave() async {
+    if (_currentNote == null || !_hasChanges) return;
+
+    // Save current page strokes first
+    _saveCurrentPageStrokes();
+
+    await _storageService.saveNote(_currentNote!);
+
+    if (mounted) {
+      setState(() => _hasChanges = false);
+      // Show brief auto-save indicator
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('자동 저장됨'),
+          duration: Duration(seconds: 1),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   Future<void> _loadNote() async {
@@ -98,10 +166,12 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     if (_currentNote == null) return;
 
     final strokes = _canvasKey.currentState?.strokes ?? [];
+    final shapes = _canvasKey.currentState?.shapes ?? [];
     // Use page number from pages array, not index
     if (_currentPageIndex < _currentNote!.pages.length) {
       final pageNumber = _currentNote!.pages[_currentPageIndex].pageNumber;
       _currentNote = _currentNote!.updatePageStrokes(pageNumber, strokes);
+      _currentNote = _currentNote!.updatePageShapes(pageNumber, shapes);
     }
   }
 
@@ -136,6 +206,15 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           onPressed: _onBackPressed,
         ),
         actions: [
+          // 즐겨찾기 토글 버튼
+          IconButton(
+            icon: Icon(
+              _currentNote?.isFavorite == true ? Icons.star : Icons.star_border,
+              color: _currentNote?.isFavorite == true ? Colors.amber : null,
+            ),
+            tooltip: _currentNote?.isFavorite == true ? '즐겨찾기 해제' : '즐겨찾기 추가',
+            onPressed: _toggleFavorite,
+          ),
           IconButton(
             icon: const Icon(Icons.save),
             tooltip: '저장',
@@ -149,9 +228,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       ),
       body: Column(
         children: [
-          // Toolbar
+          // Toolbar (전역 설정: 실행취소/다시실행, 색상, 굵기, 전체삭제)
           DrawingToolbar(
-            currentTool: _currentTool,
             currentColor: _currentColor,
             currentWidth: _currentWidth,
             canUndo: _canUndo,
@@ -165,9 +243,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
               _updateUndoRedoState();
             },
             onClear: _showClearConfirmDialog,
-            onToolChanged: (tool) {
-              setState(() => _currentTool = tool);
-            },
             onColorChanged: (color) {
               setState(() => _currentColor = color);
             },
@@ -175,80 +250,123 @@ class _EditorPageState extends ConsumerState<EditorPage> {
               setState(() => _currentWidth = width);
             },
           ),
-          // Canvas with floating quick toolbar
+          // Canvas - A4 비율로 화면 가득 채움
           Expanded(
             child: Stack(
               children: [
-                DrawingCanvas(
-                  key: _canvasKey,
-                  strokeColor: _currentColor,
-                  strokeWidth: _currentWidth,
-                  toolType: _toolTypeFromDrawingTool(_currentTool),
-                  drawingTool: _currentTool,
-                  pageTemplate: _currentTemplate,
-                  onStrokesChanged: (strokes) {
-                    _updateUndoRedoState();
-                    if (!_hasChanges) {
-                      setState(() => _hasChanges = true);
-                    }
-                  },
-                ),
-                // Floating quick toolbar at bottom center
-                Positioned(
-                  bottom: 16,
-                  left: 0,
-                  right: 0,
-                  child: Center(
-                    child: QuickToolbar(
-                      currentTool: _currentTool,
-                      currentColor: _currentColor,
-                      currentWidth: _currentWidth,
-                      currentTemplate: _currentTemplate,
-                      canUndo: _canUndo,
-                      canRedo: _canRedo,
-                      hasSelection: _canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false,
-                      onToolChanged: (tool) {
-                        print('[EDITOR] Tool changed to: $tool'); // 디버그 로그
-                        setState(() => _currentTool = tool);
-                        // Clear selection when switching away from lasso
-                        if (tool != DrawingTool.lasso) {
-                          _canvasKey.currentState?.clearSelection();
-                        }
-                      },
-                      onColorChanged: (color) {
-                        setState(() => _currentColor = color);
-                      },
-                      onWidthChanged: (width) {
-                        setState(() => _currentWidth = width);
-                      },
-                      onTemplateChanged: (template) {
-                        setState(() => _currentTemplate = template);
-                      },
-                      onUndo: () {
-                        _canvasKey.currentState?.undo();
-                        _updateUndoRedoState();
-                      },
-                      onRedo: () {
-                        _canvasKey.currentState?.redo();
-                        _updateUndoRedoState();
-                      },
-                      onCopySelection: () {
-                        _canvasKey.currentState?.copySelection();
-                        _updateUndoRedoState();
-                        setState(() => _hasChanges = true);
-                      },
-                      onDeleteSelection: () {
-                        _canvasKey.currentState?.deleteSelection();
-                        _updateUndoRedoState();
-                        setState(() => _hasChanges = true);
-                      },
-                      onClearSelection: () {
-                        _canvasKey.currentState?.clearSelection();
-                        setState(() {});
-                      },
+                // 용지 - 화면 전체를 A4 비율로 채움
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.white,
+                    child: DrawingCanvas(
+                            key: _canvasKey,
+                            strokeColor: _currentColor,
+                            strokeWidth: _currentWidth,
+                            toolType: _toolTypeFromDrawingTool(_currentTool),
+                            drawingTool: _currentTool,
+                            pageTemplate: _currentTemplate,
+                            lassoColor: _currentColor,
+                            initialShapes: _currentNote?.getShapesForPage(_currentPageIndex),
+                            onStrokesChanged: (strokes) {
+                              _updateUndoRedoState();
+                              if (!_hasChanges) {
+                                setState(() => _hasChanges = true);
+                              }
+                              _scheduleAutoSave();
+                            },
+                            onShapesChanged: (shapes) {
+                              _updateUndoRedoState();
+                              if (!_hasChanges) {
+                                setState(() => _hasChanges = true);
+                              }
+                              _scheduleAutoSave();
+                            },
+                            onImageSelectionChanged: (hasSelection) {
+                              setState(() {
+                                _showImageEditToolbar = hasSelection;
+                              });
+                            },
                     ),
                   ),
                 ),
+                // Floating quick toolbar at bottom center
+                  Positioned(
+                    bottom: 16,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: QuickToolbar(
+                        currentTool: _currentTool,
+                        currentColor: _currentColor,
+                        currentWidth: _currentWidth,
+                        currentTemplate: _currentTemplate,
+                        hasSelection: _canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false,
+                        onToolChanged: (tool) {
+                          print('[EDITOR] Tool changed to: $tool'); // 디버그 로그
+                          setState(() => _currentTool = tool);
+                          // Clear selection when switching away from lasso
+                          if (tool != DrawingTool.lasso) {
+                            _canvasKey.currentState?.clearSelection();
+                          }
+                        },
+                        onColorChanged: (color) {
+                          setState(() => _currentColor = color);
+                        },
+                        onWidthChanged: (width) {
+                          setState(() => _currentWidth = width);
+                        },
+                        onTemplateChanged: (template) {
+                          setState(() => _currentTemplate = template);
+                        },
+                        onCopySelection: () {
+                          _canvasKey.currentState?.copySelection();
+                          _updateUndoRedoState();
+                          setState(() => _hasChanges = true);
+                        },
+                        onDeleteSelection: () {
+                          _canvasKey.currentState?.deleteSelection();
+                          _updateUndoRedoState();
+                          setState(() => _hasChanges = true);
+                        },
+                        onClearSelection: () {
+                          _canvasKey.currentState?.clearSelection();
+                          setState(() {});
+                        },
+                        onInsertImage: _insertImage,
+                        onInsertText: _insertTextBox,
+                        onInsertTable: _showInsertTableDialog,
+                      ),
+                    ),
+                  ),
+                  // Image edit toolbar (floating at top right, Transform 외부)
+                  if (_showImageEditToolbar)
+                    Positioned(
+                      top: 16,
+                      right: 16,
+                      child: ImageEditToolbar(
+                        rotation: _canvasKey.currentState?.selectedImage?.rotation ?? 0,
+                        opacity: _canvasKey.currentState?.selectedImage?.opacity ?? 1.0,
+                        onRotationChanged: (rotation) {
+                          _canvasKey.currentState?.updateImageRotation(rotation);
+                          setState(() => _hasChanges = true);
+                        },
+                        onOpacityChanged: (opacity) {
+                          _canvasKey.currentState?.updateImageOpacity(opacity);
+                          setState(() => _hasChanges = true);
+                        },
+                        onDelete: () {
+                          _canvasKey.currentState?.deleteSelectedImage();
+                          setState(() {
+                            _showImageEditToolbar = false;
+                            _hasChanges = true;
+                          });
+                        },
+                        onClose: () {
+                          _canvasKey.currentState?.clearImageSelection();
+                          setState(() => _showImageEditToolbar = false);
+                        },
+                      ),
+                    ),
               ],
             ),
           ),
@@ -482,6 +600,11 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         return ToolType.eraser;
       case DrawingTool.lasso:
         return ToolType.pen; // Lasso doesn't draw strokes
+      case DrawingTool.shapeLine:
+      case DrawingTool.shapeRectangle:
+      case DrawingTool.shapeCircle:
+      case DrawingTool.shapeArrow:
+        return ToolType.pen; // Shapes use pen-style strokes
     }
   }
 
@@ -509,6 +632,30 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       final totalStrokes = _currentNote!.strokes.length;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('저장됨: ${_currentNote!.pageCount}페이지, $totalStrokes개의 스트로크')),
+      );
+    }
+  }
+
+  /// 즐겨찾기 토글
+  Future<void> _toggleFavorite() async {
+    if (_currentNote == null) return;
+
+    // 로컬 상태 먼저 업데이트 (빠른 UI 반응)
+    setState(() {
+      _currentNote = _currentNote!.copyWith(
+        isFavorite: !_currentNote!.isFavorite,
+      );
+    });
+
+    // 저장소에도 저장
+    await _storageService.saveNote(_currentNote!);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_currentNote!.isFavorite ? '즐겨찾기에 추가됨' : '즐겨찾기에서 제거됨'),
+          duration: const Duration(seconds: 1),
+        ),
       );
     }
   }
@@ -611,72 +758,319 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   void _showMoreMenu() {
     showModalBottomSheet(
       context: context,
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.add_photo_alternate),
-              title: const Text('이미지 삽입'),
-              onTap: () {
-                Navigator.pop(context);
-                _insertImage();
-              },
+      isScrollControlled: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.8,
+        expand: false,
+        builder: (context, scrollController) => SingleChildScrollView(
+          controller: scrollController,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 드래그 핸들
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+
+                // 내보내기 섹션
+                _buildMenuSection('내보내기', Icons.upload_outlined, [
+                  _buildMenuItem(Icons.image, '이미지 (PNG)', () {
+                    Navigator.pop(context);
+                    _showExportImageDialog();
+                  }),
+                  _buildMenuItem(Icons.picture_as_pdf, 'PDF', () {
+                    Navigator.pop(context);
+                    _exportToPdf();
+                  }),
+                  _buildMenuItem(Icons.share, '공유', () {
+                    Navigator.pop(context);
+                    _shareNote();
+                  }),
+                ]),
+
+                const Divider(height: 24),
+
+                // 노트 관리 섹션
+                _buildMenuSection('노트 관리', Icons.note_outlined, [
+                  _buildMenuItem(Icons.info_outline, '노트 정보', () {
+                    Navigator.pop(context);
+                    _showNoteInfo();
+                  }),
+                  _buildMenuItem(
+                    Icons.label,
+                    '태그 관리',
+                    () {
+                      Navigator.pop(context);
+                      _showTagManagementDialog();
+                    },
+                    subtitle: _currentNote?.tags.isEmpty == true
+                        ? '태그 없음'
+                        : _currentNote!.tags.join(', '),
+                  ),
+                ]),
+
+                const Divider(height: 24),
+
+                // 설정 섹션
+                _buildMenuSection('설정', Icons.settings_outlined, [
+                  _buildMenuItem(
+                    Icons.auto_fix_high,
+                    '필기 보정',
+                    () {
+                      Navigator.pop(context);
+                      _showSmoothingDialog();
+                    },
+                    subtitle: _getSmoothingLevelText(_smoothingLevel),
+                  ),
+                  _buildMenuItem(Icons.settings, '앱 설정', () {
+                    Navigator.pop(context);
+                    _openSettings();
+                  }),
+                ]),
+
+                const SizedBox(height: 16),
+              ],
             ),
-            ListTile(
-              leading: const Icon(Icons.text_fields),
-              title: const Text('텍스트 삽입'),
-              onTap: () {
-                Navigator.pop(context);
-                _insertTextBox();
-              },
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 메뉴 섹션 헤더 빌드
+  Widget _buildMenuSection(String title, IconData icon, List<Widget> items) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Row(
+            children: [
+              Icon(icon, size: 18, color: Colors.grey[600]),
+              const SizedBox(width: 8),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[600],
+                ),
+              ),
+            ],
+          ),
+        ),
+        Row(
+          children: items.map((item) => Expanded(child: item)).toList(),
+        ),
+      ],
+    );
+  }
+
+  /// 메뉴 아이템 빌드 (카드 스타일)
+  Widget _buildMenuItem(IconData icon, String label, VoidCallback onTap, {String? subtitle}) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 24),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                style: const TextStyle(fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
+              if (subtitle != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    subtitle,
+                    style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const SettingsPage(),
+      ),
+    );
+    // Reload settings when returning from settings page
+    if (mounted) {
+      setState(() {
+        _loadSettings();
+      });
+    }
+  }
+
+  /// 태그 관리 다이얼로그 표시
+  void _showTagManagementDialog() {
+    if (_currentNote == null) return;
+
+    final tagController = TextEditingController();
+    List<String> currentTags = List.from(_currentNote!.tags);
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('태그 관리'),
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 태그 입력 필드
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: tagController,
+                        decoration: const InputDecoration(
+                          hintText: '새 태그 입력',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        onSubmitted: (value) async {
+                          if (value.trim().isNotEmpty) {
+                            final normalizedTag = value.trim().toLowerCase();
+                            if (!currentTags.contains(normalizedTag)) {
+                              setDialogState(() {
+                                currentTags.add(normalizedTag);
+                              });
+                              await _storageService.addTag(_currentNote!.id, normalizedTag);
+                              _currentNote = await _storageService.loadNote(_currentNote!.id);
+                              tagController.clear();
+                              setState(() {});
+                            }
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: () async {
+                        final value = tagController.text;
+                        if (value.trim().isNotEmpty) {
+                          final normalizedTag = value.trim().toLowerCase();
+                          if (!currentTags.contains(normalizedTag)) {
+                            setDialogState(() {
+                              currentTags.add(normalizedTag);
+                            });
+                            await _storageService.addTag(_currentNote!.id, normalizedTag);
+                            _currentNote = await _storageService.loadNote(_currentNote!.id);
+                            tagController.clear();
+                            setState(() {});
+                          }
+                        }
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+
+                // 현재 태그 목록
+                const Text('현재 태그:', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                if (currentTags.isEmpty)
+                  Text('태그 없음', style: TextStyle(color: Colors.grey[500]))
+                else
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: currentTags.map((tag) {
+                      return Chip(
+                        label: Text(tag),
+                        deleteIcon: const Icon(Icons.close, size: 18),
+                        onDeleted: () async {
+                          setDialogState(() {
+                            currentTags.remove(tag);
+                          });
+                          await _storageService.removeTag(_currentNote!.id, tag);
+                          _currentNote = await _storageService.loadNote(_currentNote!.id);
+                          setState(() {});
+                        },
+                      );
+                    }).toList(),
+                  ),
+
+                const SizedBox(height: 16),
+
+                // 자주 사용하는 태그 추천
+                FutureBuilder<List<String>>(
+                  future: _storageService.getAllTags(),
+                  builder: (context, snapshot) {
+                    if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                      return const SizedBox.shrink();
+                    }
+                    final allTags = snapshot.data!
+                        .where((t) => !currentTags.contains(t))
+                        .take(5)
+                        .toList();
+                    if (allTags.isEmpty) return const SizedBox.shrink();
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('추천 태그:', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: allTags.map((tag) {
+                            return ActionChip(
+                              label: Text(tag),
+                              onPressed: () async {
+                                setDialogState(() {
+                                  currentTags.add(tag);
+                                });
+                                await _storageService.addTag(_currentNote!.id, tag);
+                                _currentNote = await _storageService.loadNote(_currentNote!.id);
+                                setState(() {});
+                              },
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ],
             ),
-            ListTile(
-              leading: const Icon(Icons.image),
-              title: const Text('이미지로 내보내기'),
-              onTap: () {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('이미지 내보내기 기능 구현 예정')),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.picture_as_pdf),
-              title: const Text('PDF로 내보내기'),
-              onTap: () {
-                Navigator.pop(context);
-                _exportToPdf();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.share),
-              title: const Text('공유'),
-              onTap: () {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('공유 기능 구현 예정')),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: const Text('노트 정보'),
-              onTap: () {
-                Navigator.pop(context);
-                _showNoteInfo();
-              },
-            ),
-            const Divider(),
-            ListTile(
-              leading: const Icon(Icons.auto_fix_high),
-              title: const Text('필기 보정'),
-              subtitle: Text(_getSmoothingLevelText(_smoothingLevel)),
-              onTap: () {
-                Navigator.pop(context);
-                _showSmoothingDialog();
-              },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('닫기'),
             ),
           ],
         ),
@@ -832,12 +1226,350 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     }
   }
 
-  Future<void> _exportToPdf() async {
+  void _showExportImageDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('이미지로 내보내기'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.image),
+              title: const Text('PNG (투명 배경 지원)'),
+              subtitle: const Text('고품질, 용량 큼'),
+              onTap: () {
+                Navigator.pop(context);
+                _exportAsImage('png');
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo),
+              title: const Text('JPG (흰 배경)'),
+              subtitle: const Text('작은 용량'),
+              onTap: () {
+                Navigator.pop(context);
+                _exportAsImage('jpg');
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('취소'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _exportAsImage(String format) async {
     // Save current page first
     _saveCurrentPageStrokes();
 
     final allStrokes = _currentNote?.strokes ?? [];
     if (allStrokes.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('내보낼 필기가 없습니다')),
+        );
+      }
+      return;
+    }
+
+    // Show loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 16),
+            Text('${format.toUpperCase()} 생성 중...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      // Get canvas size from render box
+      final renderBox = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
+      final canvasSize = renderBox?.size ?? const Size(800, 600);
+
+      final imageService = ImageExportService.instance;
+      String? filePath;
+
+      if (format == 'png') {
+        filePath = await imageService.exportAsPng(
+          strokes: allStrokes,
+          canvasSize: canvasSize,
+          title: _currentNote?.title ?? '새 노트',
+        );
+      } else {
+        filePath = await imageService.exportAsJpg(
+          strokes: allStrokes,
+          canvasSize: canvasSize,
+          title: _currentNote?.title ?? '새 노트',
+        );
+      }
+
+      // Close loading dialog
+      if (mounted) Navigator.pop(context);
+
+      if (filePath != null) {
+        // Show success dialog with options
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: Text('${format.toUpperCase()} 내보내기 완료'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('이미지 파일이 생성되었습니다.'),
+                  const SizedBox(height: 8),
+                  Text(
+                    filePath!,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('확인'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    Navigator.pop(context);
+                    // Open the image file
+                    final uri = Uri.file(filePath!);
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri);
+                    }
+                  },
+                  child: const Text('열기'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    Navigator.pop(context);
+                    // Open the folder
+                    final folder = filePath!.substring(0, filePath!.lastIndexOf('\\'));
+                    final uri = Uri.file(folder);
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri);
+                    }
+                  },
+                  child: const Text('폴더 열기'),
+                ),
+              ],
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('이미지 내보내기 실패')),
+          );
+        }
+      }
+    } catch (e) {
+      // Close loading dialog on error
+      if (mounted) Navigator.pop(context);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('오류: $e')),
+        );
+      }
+    }
+  }
+
+  /// 표 삽입 다이얼로그
+  void _showInsertTableDialog() {
+    int rows = 3;
+    int columns = 3;
+    double cellWidth = 80.0;
+    double cellHeight = 40.0;
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('표 삽입'),
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 행 수 설정
+                Row(
+                  children: [
+                    const Text('행 수:'),
+                    const SizedBox(width: 16),
+                    IconButton(
+                      icon: const Icon(Icons.remove),
+                      onPressed: rows > 1
+                          ? () => setDialogState(() => rows--)
+                          : null,
+                    ),
+                    Text('$rows', style: const TextStyle(fontSize: 18)),
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: rows < 20
+                          ? () => setDialogState(() => rows++)
+                          : null,
+                    ),
+                  ],
+                ),
+                // 열 수 설정
+                Row(
+                  children: [
+                    const Text('열 수:'),
+                    const SizedBox(width: 16),
+                    IconButton(
+                      icon: const Icon(Icons.remove),
+                      onPressed: columns > 1
+                          ? () => setDialogState(() => columns--)
+                          : null,
+                    ),
+                    Text('$columns', style: const TextStyle(fontSize: 18)),
+                    IconButton(
+                      icon: const Icon(Icons.add),
+                      onPressed: columns < 10
+                          ? () => setDialogState(() => columns++)
+                          : null,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                // 셀 크기 설정
+                const Text('셀 크기', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('너비:'),
+                    Expanded(
+                      child: Slider(
+                        value: cellWidth,
+                        min: 40,
+                        max: 150,
+                        divisions: 22,
+                        label: '${cellWidth.round()}',
+                        onChanged: (value) => setDialogState(() => cellWidth = value),
+                      ),
+                    ),
+                    Text('${cellWidth.round()}'),
+                  ],
+                ),
+                Row(
+                  children: [
+                    const Text('높이:'),
+                    Expanded(
+                      child: Slider(
+                        value: cellHeight,
+                        min: 20,
+                        max: 80,
+                        divisions: 12,
+                        label: '${cellHeight.round()}',
+                        onChanged: (value) => setDialogState(() => cellHeight = value),
+                      ),
+                    ),
+                    Text('${cellHeight.round()}'),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                // 미리보기
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    '표 크기: ${(columns * cellWidth).round()} x ${(rows * cellHeight).round()} px',
+                    style: TextStyle(color: Colors.grey[600]),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('취소'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _insertTable(rows, columns, cellWidth, cellHeight);
+              },
+              child: const Text('삽입'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 표를 CanvasTable로 캔버스에 삽입 (이동 가능)
+  void _insertTable(int rows, int columns, double cellWidth, double cellHeight) {
+    // 캔버스 중앙에 표 배치
+    final renderBox = _canvasKey.currentContext?.findRenderObject() as RenderBox?;
+    final canvasSize = renderBox?.size ?? const Size(800, 600);
+
+    final tableWidth = columns * cellWidth;
+    final tableHeight = rows * cellHeight;
+
+    // 캔버스 중앙에서 시작
+    final startX = (canvasSize.width - tableWidth) / 2;
+    final startY = (canvasSize.height - tableHeight) / 2;
+
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+
+    // CanvasTable 생성
+    final table = CanvasTable(
+      id: 'table_$timestamp',
+      position: Offset(startX, startY),
+      rows: rows,
+      columns: columns,
+      cellWidth: cellWidth,
+      cellHeight: cellHeight,
+      borderColor: _currentColor,
+      borderWidth: 1.5,
+      timestamp: timestamp,
+    );
+
+    // 캔버스에 표 추가
+    _canvasKey.currentState?.addTable(table);
+
+    setState(() => _hasChanges = true);
+    _updateUndoRedoState();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${rows}x$columns 표가 삽입되었습니다 (드래그하여 이동 가능)')),
+    );
+  }
+
+  Future<void> _exportToPdf() async {
+    // 먼저 현재 캔버스 상태를 노트에 동기화
+    _saveCurrentPageStrokes();
+
+    // 캔버스에서 스트로크 가져오기 시도, 실패하면 노트에서 가져오기
+    List<Stroke> currentStrokes = _canvasKey.currentState?.strokes ?? [];
+
+    // 캔버스 스트로크가 비어있으면 노트에서 가져오기 (fallback)
+    if (currentStrokes.isEmpty && _currentNote != null) {
+      currentStrokes = _currentNote!.strokes;
+    }
+
+    if (currentStrokes.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('내보낼 필기가 없습니다')),
@@ -868,7 +1600,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
       final pdfService = PdfExportService.instance;
       final filePath = await pdfService.exportToPdfSmooth(
-        strokes: allStrokes,
+        strokes: currentStrokes,
         title: _currentNote?.title ?? '새 노트',
         canvasSize: canvasSize,
       );
@@ -944,6 +1676,52 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('PDF 생성 오류: $e')),
+        );
+      }
+    }
+  }
+
+  /// 노트 공유 (.wnote 파일로 공유)
+  Future<void> _shareNote() async {
+    if (_currentNote == null) return;
+
+    // 현재 페이지 저장 후 공유
+    _saveCurrentPageStrokes();
+    await _storageService.saveNote(_currentNote!);
+
+    // 로딩 표시
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('공유 준비 중...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final success = await BackupService.instance.shareNote(_currentNote!);
+
+      // 로딩 닫기
+      if (mounted) Navigator.pop(context);
+
+      if (!success && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('공유에 실패했습니다')),
+        );
+      }
+    } catch (e) {
+      // 로딩 닫기
+      if (mounted) Navigator.pop(context);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('공유 오류: $e')),
         );
       }
     }

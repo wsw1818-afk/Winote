@@ -8,6 +8,10 @@ enum DrawingTool {
   highlighter,
   eraser,
   lasso, // 올가미 선택 도구
+  shapeLine, // 직선
+  shapeRectangle, // 사각형
+  shapeCircle, // 원/타원
+  shapeArrow, // 화살표
 }
 
 /// Page template types for different note styles
@@ -145,6 +149,10 @@ class DrawingState extends ChangeNotifier {
   Color get currentColor {
     switch (_currentTool) {
       case DrawingTool.pen:
+      case DrawingTool.shapeLine:
+      case DrawingTool.shapeRectangle:
+      case DrawingTool.shapeCircle:
+      case DrawingTool.shapeArrow:
         return _penColor;
       case DrawingTool.highlighter:
         return _highlighterColor;
@@ -158,6 +166,10 @@ class DrawingState extends ChangeNotifier {
   double get currentWidth {
     switch (_currentTool) {
       case DrawingTool.pen:
+      case DrawingTool.shapeLine:
+      case DrawingTool.shapeRectangle:
+      case DrawingTool.shapeCircle:
+      case DrawingTool.shapeArrow:
         return _penWidth;
       case DrawingTool.highlighter:
         return _highlighterWidth;

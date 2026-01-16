@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/note_storage_service.dart';
+import '../../../domain/entities/stroke.dart';
 
 class LibraryPage extends ConsumerStatefulWidget {
   const LibraryPage({super.key});
@@ -13,25 +14,73 @@ class LibraryPage extends ConsumerStatefulWidget {
 class _LibraryPageState extends ConsumerState<LibraryPage> {
   final NoteStorageService _storageService = NoteStorageService.instance;
   List<Note> _notes = [];
+  List<Note> _filteredNotes = [];
   List<NoteFolder> _folders = [];
   String? _currentFolderId; // null = root folder
   bool _isLoading = true;
+  bool _isSearching = false;
+  String _searchQuery = '';
+  final TextEditingController _searchController = TextEditingController();
+  bool _showFavoritesOnly = false; // 즐겨찾기 필터
+  String? _selectedTag; // 선택된 태그 필터
+  List<String> _allTags = []; // 모든 태그 목록
 
   @override
   void initState() {
     super.initState();
     _loadData();
+    _searchController.addListener(_onSearchChanged);
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _onSearchChanged() {
+    setState(() {
+      _searchQuery = _searchController.text;
+      _filterNotes();
+    });
+  }
+
+  void _filterNotes() {
+    var filtered = _notes.toList();
+
+    // 즐겨찾기 필터
+    if (_showFavoritesOnly) {
+      filtered = filtered.where((note) => note.isFavorite).toList();
+    }
+
+    // 태그 필터
+    if (_selectedTag != null) {
+      filtered = filtered.where((note) => note.tags.contains(_selectedTag)).toList();
+    }
+
+    // 검색어 필터
+    if (_searchQuery.isNotEmpty) {
+      final lowerQuery = _searchQuery.toLowerCase();
+      filtered = filtered.where((note) {
+        return note.title.toLowerCase().contains(lowerQuery);
+      }).toList();
+    }
+
+    _filteredNotes = filtered;
   }
 
   Future<void> _loadData() async {
     setState(() => _isLoading = true);
     _folders = await _storageService.listFolders();
     _notes = await _storageService.listNotesInFolder(_currentFolderId);
+    _allTags = await _storageService.getAllTags();
+    _filterNotes();
     setState(() => _isLoading = false);
   }
 
   Future<void> _loadNotes() async {
     _notes = await _storageService.listNotesInFolder(_currentFolderId);
+    _filterNotes();
     setState(() {});
   }
 
@@ -41,11 +90,31 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_currentFolderId == null ? '라이브러리' : currentFolder?.name ?? '폴더'),
+        title: _isSearching
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                decoration: InputDecoration(
+                  hintText: '노트 검색...',
+                  border: InputBorder.none,
+                  hintStyle: TextStyle(color: Colors.grey[400]),
+                ),
+                style: const TextStyle(fontSize: 18),
+              )
+            : Text(_currentFolderId == null ? '라이브러리' : currentFolder?.name ?? '폴더'),
         leading: IconButton(
-          icon: Icon(_currentFolderId == null ? Icons.arrow_back : Icons.folder_open),
+          icon: Icon(_isSearching
+              ? Icons.close
+              : (_currentFolderId == null ? Icons.arrow_back : Icons.folder_open)),
           onPressed: () {
-            if (_currentFolderId == null) {
+            if (_isSearching) {
+              setState(() {
+                _isSearching = false;
+                _searchController.clear();
+                _searchQuery = '';
+                _filterNotes();
+              });
+            } else if (_currentFolderId == null) {
               context.pop();
             } else {
               // Go back to root
@@ -55,16 +124,84 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
           },
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.create_new_folder),
-            tooltip: '새 폴더',
-            onPressed: _showCreateFolderDialog,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: '새로고침',
-            onPressed: _loadData,
-          ),
+          if (!_isSearching) ...[
+            // 즐겨찾기 필터 버튼
+            IconButton(
+              icon: Icon(
+                _showFavoritesOnly ? Icons.star : Icons.star_border,
+                color: _showFavoritesOnly ? Colors.amber : null,
+              ),
+              tooltip: _showFavoritesOnly ? '전체 노트 보기' : '즐겨찾기만 보기',
+              onPressed: () {
+                setState(() {
+                  _showFavoritesOnly = !_showFavoritesOnly;
+                  _filterNotes();
+                });
+              },
+            ),
+            // 태그 필터 버튼
+            PopupMenuButton<String?>(
+              icon: Icon(
+                Icons.label,
+                color: _selectedTag != null ? Colors.blue : null,
+              ),
+              tooltip: '태그 필터',
+              onSelected: (tag) {
+                setState(() {
+                  _selectedTag = tag;
+                  _filterNotes();
+                });
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem<String?>(
+                  value: null,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.clear, size: 20),
+                      const SizedBox(width: 8),
+                      const Text('전체 보기'),
+                      if (_selectedTag == null) ...[
+                        const Spacer(),
+                        const Icon(Icons.check, size: 18, color: Colors.blue),
+                      ],
+                    ],
+                  ),
+                ),
+                if (_allTags.isNotEmpty) const PopupMenuDivider(),
+                ..._allTags.map((tag) => PopupMenuItem<String?>(
+                      value: tag,
+                      child: Row(
+                        children: [
+                          const Icon(Icons.label_outline, size: 20),
+                          const SizedBox(width: 8),
+                          Text(tag),
+                          if (_selectedTag == tag) ...[
+                            const Spacer(),
+                            const Icon(Icons.check, size: 18, color: Colors.blue),
+                          ],
+                        ],
+                      ),
+                    )),
+              ],
+            ),
+            IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: '검색',
+              onPressed: () {
+                setState(() => _isSearching = true);
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.create_new_folder),
+              tooltip: '새 폴더',
+              onPressed: _showCreateFolderDialog,
+            ),
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: '새로고침',
+              onPressed: _loadData,
+            ),
+          ],
         ],
       ),
       body: _isLoading
@@ -79,19 +216,89 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
   }
 
   Widget _buildContent() {
+    // Show search results if searching
+    if (_isSearching || _searchQuery.isNotEmpty) {
+      if (_filteredNotes.isEmpty) {
+        return _buildNoSearchResults();
+      }
+      return _buildSearchResults();
+    }
+
     if (_currentFolderId == null) {
       // Root: show folders + notes
-      if (_folders.isEmpty && _notes.isEmpty) {
+      if (_folders.isEmpty && _filteredNotes.isEmpty) {
         return _buildEmptyState();
       }
       return _buildFoldersAndNotes();
     } else {
       // Inside folder: show only notes
-      if (_notes.isEmpty) {
+      if (_filteredNotes.isEmpty) {
         return _buildEmptyFolderState();
       }
       return _buildNotesList();
     }
+  }
+
+  Widget _buildNoSearchResults() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.search_off,
+            size: 80,
+            color: Colors.grey[400],
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '"$_searchQuery" 검색 결과 없음',
+            style: TextStyle(fontSize: 18, color: Colors.grey[600]),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '다른 검색어를 입력해보세요',
+            style: TextStyle(fontSize: 14, color: Colors.grey[500]),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchResults() {
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              '검색 결과: ${_filteredNotes.length}개',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey[600],
+              ),
+            ),
+          ),
+          Expanded(
+            child: GridView.builder(
+              padding: const EdgeInsets.all(16),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 16,
+                mainAxisSpacing: 16,
+                childAspectRatio: 0.85,
+              ),
+              itemCount: _filteredNotes.length,
+              itemBuilder: (context, index) {
+                return _buildNoteCard(_filteredNotes[index]);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildFoldersAndNotes() {
@@ -131,7 +338,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
             ),
           ],
           // Notes section
-          if (_notes.isNotEmpty) ...[
+          if (_filteredNotes.isNotEmpty) ...[
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
@@ -155,8 +362,8 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
                   childAspectRatio: 0.85,
                 ),
                 delegate: SliverChildBuilderDelegate(
-                  (context, index) => _buildNoteCard(_notes[index]),
-                  childCount: _notes.length,
+                  (context, index) => _buildNoteCard(_filteredNotes[index]),
+                  childCount: _filteredNotes.length,
                 ),
               ),
             ),
@@ -262,9 +469,9 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
           mainAxisSpacing: 16,
           childAspectRatio: 0.85,
         ),
-        itemCount: _notes.length,
+        itemCount: _filteredNotes.length,
         itemBuilder: (context, index) {
-          final note = _notes[index];
+          final note = _filteredNotes[index];
           return _buildNoteCard(note);
         },
       ),
@@ -272,6 +479,9 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
   }
 
   Widget _buildNoteCard(Note note) {
+    // Get first page strokes for thumbnail
+    final firstPageStrokes = note.pages.isNotEmpty ? note.pages.first.strokes : note.strokes;
+
     return Card(
       clipBehavior: Clip.antiAlias,
       elevation: 2,
@@ -285,12 +495,12 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Preview area
+            // Preview area with actual thumbnail
             Expanded(
               child: Container(
                 width: double.infinity,
                 color: Colors.grey[100],
-                child: note.strokes.isEmpty
+                child: firstPageStrokes.isEmpty
                     ? Center(
                         child: Icon(
                           Icons.draw_outlined,
@@ -298,24 +508,11 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
                           color: Colors.grey[300],
                         ),
                       )
-                    : Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.edit_note,
-                              size: 40,
-                              color: Colors.blue[300],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${note.strokes.length}개 스트로크',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey[600],
-                              ),
-                            ),
-                          ],
+                    : ClipRect(
+                        child: CustomPaint(
+                          painter: _NoteThumbnailPainter(
+                            strokes: firstPageStrokes,
+                          ),
                         ),
                       ),
               ),
@@ -326,23 +523,78 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    note.title,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      // 즐겨찾기 별 아이콘
+                      if (note.isFavorite)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 4),
+                          child: Icon(
+                            Icons.star,
+                            size: 16,
+                            color: Colors.amber,
+                          ),
+                        ),
+                      Expanded(
+                        child: Text(
+                          note.title,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (note.pages.length > 1)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Text(
+                            '${note.pages.length}p',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.blue[700],
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 4),
-                  Text(
-                    _formatDate(note.modifiedAt),
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.grey[600],
+                  // 태그 표시
+                  if (note.tags.isNotEmpty)
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 2,
+                      children: note.tags.take(3).map((tag) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            '#$tag',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    )
+                  else
+                    Text(
+                      _formatDate(note.modifiedAt),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[600],
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -383,6 +635,19 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
               onTap: () {
                 Navigator.pop(context);
                 context.push('/editor/${note.id}');
+              },
+            ),
+            // 즐겨찾기 토글
+            ListTile(
+              leading: Icon(
+                note.isFavorite ? Icons.star : Icons.star_border,
+                color: note.isFavorite ? Colors.amber : null,
+              ),
+              title: Text(note.isFavorite ? '즐겨찾기 해제' : '즐겨찾기 추가'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _storageService.toggleFavorite(note.id);
+                _loadNotes();
               },
             ),
             ListTile(
@@ -697,5 +962,92 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
         ],
       ),
     );
+  }
+}
+
+/// Custom painter for note thumbnail preview
+class _NoteThumbnailPainter extends CustomPainter {
+  final List<Stroke> strokes;
+
+  _NoteThumbnailPainter({required this.strokes});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (strokes.isEmpty) return;
+
+    // Calculate bounding box of all strokes
+    double minX = double.infinity;
+    double minY = double.infinity;
+    double maxX = double.negativeInfinity;
+    double maxY = double.negativeInfinity;
+
+    for (final stroke in strokes) {
+      for (final point in stroke.points) {
+        if (point.x < minX) minX = point.x;
+        if (point.y < minY) minY = point.y;
+        if (point.x > maxX) maxX = point.x;
+        if (point.y > maxY) maxY = point.y;
+      }
+    }
+
+    // Add padding
+    const padding = 10.0;
+    minX -= padding;
+    minY -= padding;
+    maxX += padding;
+    maxY += padding;
+
+    // Calculate scale to fit in thumbnail
+    final contentWidth = maxX - minX;
+    final contentHeight = maxY - minY;
+
+    if (contentWidth <= 0 || contentHeight <= 0) return;
+
+    final scaleX = size.width / contentWidth;
+    final scaleY = size.height / contentHeight;
+    final scale = scaleX < scaleY ? scaleX : scaleY;
+
+    // Center the content
+    final offsetX = (size.width - contentWidth * scale) / 2 - minX * scale;
+    final offsetY = (size.height - contentHeight * scale) / 2 - minY * scale;
+
+    // Draw each stroke
+    for (final stroke in strokes) {
+      if (stroke.points.isEmpty) continue;
+
+      final paint = Paint()
+        ..color = stroke.color
+        ..strokeWidth = (stroke.width * scale).clamp(0.5, 3.0)
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke;
+
+      if (stroke.points.length == 1) {
+        // Single point - draw circle
+        final p = stroke.points.first;
+        canvas.drawCircle(
+          Offset(p.x * scale + offsetX, p.y * scale + offsetY),
+          paint.strokeWidth / 2,
+          paint,
+        );
+      } else {
+        // Multiple points - draw path
+        final path = Path();
+        final first = stroke.points.first;
+        path.moveTo(first.x * scale + offsetX, first.y * scale + offsetY);
+
+        for (int i = 1; i < stroke.points.length; i++) {
+          final p = stroke.points[i];
+          path.lineTo(p.x * scale + offsetX, p.y * scale + offsetY);
+        }
+
+        canvas.drawPath(path, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _NoteThumbnailPainter oldDelegate) {
+    return strokes.length != oldDelegate.strokes.length;
   }
 }

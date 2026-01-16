@@ -12,6 +12,15 @@ enum ToolType {
   eraser,     // 지우개
 }
 
+/// 도형 종류 (isShape가 true일 때 사용)
+enum ShapeType {
+  none,       // 일반 스트로크 (도형 아님)
+  line,       // 직선
+  rectangle,  // 사각형
+  circle,     // 원/타원
+  arrow,      // 화살표
+}
+
 /// 스트로크 (펜 획)
 class Stroke {
   final String id;
@@ -21,6 +30,8 @@ class Stroke {
   final List<StrokePoint> points;
   BoundingBox boundingBox;
   final int timestamp;
+  final bool isShape; // 도형인 경우 true (직선으로만 그림)
+  final ShapeType shapeType; // 도형 종류
 
   Stroke({
     required this.id,
@@ -30,6 +41,8 @@ class Stroke {
     required this.points,
     BoundingBox? boundingBox,
     required this.timestamp,
+    this.isShape = false,
+    this.shapeType = ShapeType.none,
   }) : boundingBox = boundingBox ?? _calculateBoundingBox(points);
 
   static BoundingBox _calculateBoundingBox(List<StrokePoint> points) {
@@ -96,6 +109,8 @@ class Stroke {
     List<StrokePoint>? points,
     BoundingBox? boundingBox,
     int? timestamp,
+    bool? isShape,
+    ShapeType? shapeType,
   }) {
     return Stroke(
       id: id ?? this.id,
@@ -105,6 +120,8 @@ class Stroke {
       points: points ?? List.from(this.points),
       boundingBox: boundingBox ?? this.boundingBox.copy(),
       timestamp: timestamp ?? this.timestamp,
+      isShape: isShape ?? this.isShape,
+      shapeType: shapeType ?? this.shapeType,
     );
   }
 
@@ -120,6 +137,8 @@ class Stroke {
       points: newPoints,
       boundingBox: newBoundingBox,
       timestamp: timestamp,
+      isShape: isShape,
+      shapeType: shapeType,
     );
   }
 

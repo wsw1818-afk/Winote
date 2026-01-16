@@ -103,27 +103,64 @@ class PdfExportService {
         page.getClientSize().height,
       );
 
-      final double scaleX = pageSize.width / canvasSize.width;
-      final double scaleY = pageSize.height / canvasSize.height;
+      // 실제 스트로크들의 바운딩 박스 계산
+      final bounds = _calculateStrokesBounds(strokes);
+
+      // 스트로크가 없거나 바운딩 박스가 없으면 빈 PDF 반환
+      if (bounds == null) {
+        final directory = await getApplicationDocumentsDirectory();
+        final pdfDir = Directory('${directory.path}/Winote/exports');
+        if (!await pdfDir.exists()) {
+          await pdfDir.create(recursive: true);
+        }
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final fileName = '${_sanitizeFileName(title)}_$timestamp.pdf';
+        final filePath = '${pdfDir.path}/$fileName';
+        final File file = File(filePath);
+        await file.writeAsBytes(await document.save());
+        document.dispose();
+        return filePath;
+      }
+
+      // 여백 추가
+      const double margin = 20.0;
+      final contentWidth = bounds.width + margin * 2;
+      final contentHeight = bounds.height + margin * 2;
+
+      // 페이지에 맞게 스케일 계산
+      final double scaleX = pageSize.width / contentWidth;
+      final double scaleY = pageSize.height / contentHeight;
       final double scale = scaleX < scaleY ? scaleX : scaleY;
+
+      // 오프셋 계산 (스트로크를 원점으로 이동 + 여백)
+      final double offsetX = -bounds.left + margin;
+      final double offsetY = -bounds.top + margin;
 
       final PdfGraphics graphics = page.graphics;
 
       for (final stroke in strokes) {
         if (stroke.points.length < 2) continue;
 
+        // 색상 알파값 확인 및 보정
+        final int alpha = stroke.color.alpha > 0 ? stroke.color.alpha : 255;
+
         final PdfPen pen = PdfPen(
           PdfColor(
             stroke.color.red,
             stroke.color.green,
             stroke.color.blue,
-            stroke.color.alpha,
+            alpha,
           ),
           width: stroke.width * scale,
         );
 
-        // Generate smooth path using Catmull-Rom spline
-        final smoothPoints = _generateCatmullRomPoints(stroke.points, scale);
+        // Generate smooth path using Catmull-Rom spline with offset
+        final smoothPoints = _generateCatmullRomPointsWithOffset(
+          stroke.points,
+          scale,
+          offsetX,
+          offsetY,
+        );
 
         for (int i = 0; i < smoothPoints.length - 1; i++) {
           graphics.drawLine(
@@ -153,6 +190,72 @@ class PdfExportService {
       debugPrint('PDF export error: $e');
       return null;
     }
+  }
+
+  /// Calculate bounding box of all strokes
+  Rect? _calculateStrokesBounds(List<Stroke> strokes) {
+    if (strokes.isEmpty) return null;
+
+    double minX = double.infinity;
+    double minY = double.infinity;
+    double maxX = double.negativeInfinity;
+    double maxY = double.negativeInfinity;
+
+    bool hasPoints = false;
+
+    for (final stroke in strokes) {
+      for (final point in stroke.points) {
+        hasPoints = true;
+        if (point.x < minX) minX = point.x;
+        if (point.y < minY) minY = point.y;
+        if (point.x > maxX) maxX = point.x;
+        if (point.y > maxY) maxY = point.y;
+      }
+    }
+
+    if (!hasPoints) return null;
+
+    return Rect.fromLTRB(minX, minY, maxX, maxY);
+  }
+
+  /// Generate Catmull-Rom spline points with offset for PDF coordinate transform
+  List<Offset> _generateCatmullRomPointsWithOffset(
+    List<StrokePoint> points,
+    double scale,
+    double offsetX,
+    double offsetY,
+  ) {
+    if (points.length < 2) return [];
+    if (points.length == 2) {
+      return [
+        Offset((points[0].x + offsetX) * scale, (points[0].y + offsetY) * scale),
+        Offset((points[1].x + offsetX) * scale, (points[1].y + offsetY) * scale),
+      ];
+    }
+
+    final List<Offset> result = [];
+    const int segments = 8;
+
+    for (int i = 0; i < points.length - 1; i++) {
+      final p0 = i > 0 ? points[i - 1] : points[i];
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      final p3 = i + 2 < points.length ? points[i + 2] : points[i + 1];
+
+      for (int j = 0; j <= segments; j++) {
+        final t = j / segments;
+        final point = _catmullRom(
+          Offset(p0.x + offsetX, p0.y + offsetY),
+          Offset(p1.x + offsetX, p1.y + offsetY),
+          Offset(p2.x + offsetX, p2.y + offsetY),
+          Offset(p3.x + offsetX, p3.y + offsetY),
+          t,
+        );
+        result.add(Offset(point.dx * scale, point.dy * scale));
+      }
+    }
+
+    return result;
   }
 
   /// Generate Catmull-Rom spline points for smooth curves

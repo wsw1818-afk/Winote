@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   file_selector_windows
+  share_plus
   sqlite3_flutter_libs
   syncfusion_pdfviewer_windows
   url_launcher_windows

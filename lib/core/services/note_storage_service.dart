@@ -4,21 +4,25 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../domain/entities/stroke.dart';
 import '../../domain/entities/stroke_point.dart';
+import '../../domain/entities/canvas_shape.dart';
 
 /// Page model for multi-page notes
 class NotePage {
   final int pageNumber;
   final List<Stroke> strokes;
+  final List<CanvasShape> shapes;
 
   NotePage({
     required this.pageNumber,
     required this.strokes,
+    this.shapes = const [],
   });
 
   Map<String, dynamic> toJson() {
     return {
       'pageNumber': pageNumber,
       'strokes': strokes.map((s) => _strokeToJson(s)).toList(),
+      'shapes': shapes.map((s) => s.toJson()).toList(),
     };
   }
 
@@ -28,16 +32,23 @@ class NotePage {
       strokes: (json['strokes'] as List)
           .map((s) => _strokeFromJson(s as Map<String, dynamic>))
           .toList(),
+      shapes: json['shapes'] != null
+          ? (json['shapes'] as List)
+              .map((s) => CanvasShape.fromJson(s as Map<String, dynamic>))
+              .toList()
+          : [],
     );
   }
 
   NotePage copyWith({
     int? pageNumber,
     List<Stroke>? strokes,
+    List<CanvasShape>? shapes,
   }) {
     return NotePage(
       pageNumber: pageNumber ?? this.pageNumber,
       strokes: strokes ?? List.from(this.strokes),
+      shapes: shapes ?? List.from(this.shapes),
     );
   }
 
@@ -55,6 +66,8 @@ class NotePage {
         'timestamp': p.timestamp,
       }).toList(),
       'timestamp': stroke.timestamp,
+      'isShape': stroke.isShape,
+      'shapeType': stroke.shapeType.index,
     };
   }
 
@@ -75,6 +88,10 @@ class NotePage {
         );
       }).toList(),
       timestamp: json['timestamp'] as int,
+      isShape: json['isShape'] as bool? ?? false,
+      shapeType: json['shapeType'] != null
+          ? ShapeType.values[json['shapeType'] as int]
+          : ShapeType.none,
     );
   }
 }
@@ -87,6 +104,8 @@ class Note {
   final List<NotePage> pages;
   final DateTime createdAt;
   final DateTime modifiedAt;
+  final bool isFavorite; // 즐겨찾기 여부
+  final List<String> tags; // 태그 목록
 
   Note({
     required this.id,
@@ -95,6 +114,8 @@ class Note {
     required this.pages,
     required this.createdAt,
     required this.modifiedAt,
+    this.isFavorite = false,
+    this.tags = const [],
   });
 
   /// Get all strokes across all pages (for backward compatibility)
@@ -115,6 +136,15 @@ class Note {
     return page.strokes;
   }
 
+  /// Get shapes for a specific page
+  List<CanvasShape> getShapesForPage(int pageNumber) {
+    final page = pages.firstWhere(
+      (p) => p.pageNumber == pageNumber,
+      orElse: () => NotePage(pageNumber: pageNumber, strokes: []),
+    );
+    return page.shapes;
+  }
+
   /// Get page count
   int get pageCount => pages.isEmpty ? 1 : pages.length;
 
@@ -127,6 +157,8 @@ class Note {
       'pages': pages.map((p) => p.toJson()).toList(),
       'createdAt': createdAt.toIso8601String(),
       'modifiedAt': modifiedAt.toIso8601String(),
+      'isFavorite': isFavorite,
+      'tags': tags,
       'version': 2, // New multi-page format
     };
   }
@@ -134,6 +166,11 @@ class Note {
   factory Note.fromJson(Map<String, dynamic> json) {
     // Check version for backward compatibility
     final version = json['version'] as int? ?? 1;
+
+    // Parse tags
+    final tags = json.containsKey('tags')
+        ? (json['tags'] as List).map((t) => t as String).toList()
+        : <String>[];
 
     if (version >= 2 && json.containsKey('pages')) {
       // New multi-page format
@@ -146,6 +183,8 @@ class Note {
             .toList(),
         createdAt: DateTime.parse(json['createdAt'] as String),
         modifiedAt: DateTime.parse(json['modifiedAt'] as String),
+        isFavorite: json['isFavorite'] as bool? ?? false,
+        tags: tags,
       );
     } else {
       // Legacy single-page format
@@ -162,6 +201,8 @@ class Note {
         pages: [NotePage(pageNumber: 0, strokes: strokes)],
         createdAt: DateTime.parse(json['createdAt'] as String),
         modifiedAt: DateTime.parse(json['modifiedAt'] as String),
+        isFavorite: json['isFavorite'] as bool? ?? false,
+        tags: tags,
       );
     }
   }
@@ -174,6 +215,8 @@ class Note {
     List<NotePage>? pages,
     DateTime? createdAt,
     DateTime? modifiedAt,
+    bool? isFavorite,
+    List<String>? tags,
   }) {
     return Note(
       id: id ?? this.id,
@@ -182,6 +225,8 @@ class Note {
       pages: pages ?? this.pages.map((p) => p.copyWith()).toList(),
       createdAt: createdAt ?? this.createdAt,
       modifiedAt: modifiedAt ?? this.modifiedAt,
+      isFavorite: isFavorite ?? this.isFavorite,
+      tags: tags ?? List.from(this.tags),
     );
   }
 
@@ -201,6 +246,31 @@ class Note {
 
     if (!pageFound) {
       newPages.add(NotePage(pageNumber: pageNumber, strokes: strokes));
+      newPages.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    }
+
+    return copyWith(
+      pages: newPages,
+      modifiedAt: DateTime.now(),
+    );
+  }
+
+  /// Update shapes for a specific page
+  Note updatePageShapes(int pageNumber, List<CanvasShape> shapes) {
+    final newPages = <NotePage>[];
+    bool pageFound = false;
+
+    for (final page in pages) {
+      if (page.pageNumber == pageNumber) {
+        newPages.add(page.copyWith(shapes: shapes));
+        pageFound = true;
+      } else {
+        newPages.add(page);
+      }
+    }
+
+    if (!pageFound) {
+      newPages.add(NotePage(pageNumber: pageNumber, strokes: [], shapes: shapes));
       newPages.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
     }
 
@@ -467,6 +537,19 @@ class NoteStorageService {
     return folder;
   }
 
+  /// Create a folder with existing ID (for restore)
+  Future<void> createFolderWithId(NoteFolder folder) async {
+    final folders = await listFolders();
+    // Check if folder already exists
+    final existingIndex = folders.indexWhere((f) => f.id == folder.id);
+    if (existingIndex >= 0) {
+      folders[existingIndex] = folder;
+    } else {
+      folders.add(folder);
+    }
+    await _saveFolders(folders);
+  }
+
   /// Update a folder
   Future<void> updateFolder(NoteFolder folder) async {
     final folders = await listFolders();
@@ -507,5 +590,102 @@ class NoteStorageService {
         modifiedAt: DateTime.now(),
       ));
     }
+  }
+
+  /// Search notes by title
+  Future<List<Note>> searchNotes(String query) async {
+    if (query.isEmpty) {
+      return listNotes();
+    }
+
+    final notes = await listNotes();
+    final lowerQuery = query.toLowerCase();
+
+    return notes.where((note) {
+      // Search in title
+      if (note.title.toLowerCase().contains(lowerQuery)) {
+        return true;
+      }
+      return false;
+    }).toList();
+  }
+
+  // ===== Favorites Management =====
+
+  /// Toggle favorite status of a note
+  Future<Note?> toggleFavorite(String noteId) async {
+    final note = await loadNote(noteId);
+    if (note != null) {
+      final updatedNote = note.copyWith(
+        isFavorite: !note.isFavorite,
+        modifiedAt: DateTime.now(),
+      );
+      await saveNote(updatedNote);
+      debugPrint('[NoteStorageService] Note ${note.isFavorite ? "unfavorited" : "favorited"}: $noteId');
+      return updatedNote;
+    }
+    return null;
+  }
+
+  /// Get all favorite notes
+  Future<List<Note>> listFavoriteNotes() async {
+    final notes = await listNotes();
+    return notes.where((note) => note.isFavorite).toList();
+  }
+
+  // ===== Tag Management =====
+
+  /// Add a tag to a note
+  Future<Note?> addTag(String noteId, String tag) async {
+    final note = await loadNote(noteId);
+    if (note != null) {
+      final normalizedTag = tag.trim().toLowerCase();
+      if (normalizedTag.isEmpty || note.tags.contains(normalizedTag)) {
+        return note;
+      }
+      final updatedNote = note.copyWith(
+        tags: [...note.tags, normalizedTag],
+        modifiedAt: DateTime.now(),
+      );
+      await saveNote(updatedNote);
+      debugPrint('[NoteStorageService] Tag added to note: $normalizedTag');
+      return updatedNote;
+    }
+    return null;
+  }
+
+  /// Remove a tag from a note
+  Future<Note?> removeTag(String noteId, String tag) async {
+    final note = await loadNote(noteId);
+    if (note != null) {
+      final normalizedTag = tag.trim().toLowerCase();
+      final updatedNote = note.copyWith(
+        tags: note.tags.where((t) => t != normalizedTag).toList(),
+        modifiedAt: DateTime.now(),
+      );
+      await saveNote(updatedNote);
+      debugPrint('[NoteStorageService] Tag removed from note: $normalizedTag');
+      return updatedNote;
+    }
+    return null;
+  }
+
+  /// Get notes by tag
+  Future<List<Note>> listNotesByTag(String tag) async {
+    final notes = await listNotes();
+    final normalizedTag = tag.trim().toLowerCase();
+    return notes.where((note) => note.tags.contains(normalizedTag)).toList();
+  }
+
+  /// Get all unique tags across all notes
+  Future<List<String>> getAllTags() async {
+    final notes = await listNotes();
+    final tagSet = <String>{};
+    for (final note in notes) {
+      tagSet.addAll(note.tags);
+    }
+    final tagList = tagSet.toList();
+    tagList.sort();
+    return tagList;
   }
 }

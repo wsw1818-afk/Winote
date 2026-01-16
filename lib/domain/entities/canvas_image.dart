@@ -7,6 +7,7 @@ class CanvasImage {
   final Offset position; // Top-left position on canvas
   final Size size; // Display size
   final double rotation; // Rotation angle in radians
+  final double opacity; // Opacity (0.0 ~ 1.0)
   final int timestamp;
 
   CanvasImage({
@@ -15,6 +16,7 @@ class CanvasImage {
     required this.position,
     required this.size,
     this.rotation = 0.0,
+    this.opacity = 1.0,
     required this.timestamp,
   });
 
@@ -24,6 +26,7 @@ class CanvasImage {
     Offset? position,
     Size? size,
     double? rotation,
+    double? opacity,
     int? timestamp,
   }) {
     return CanvasImage(
@@ -32,6 +35,7 @@ class CanvasImage {
       position: position ?? this.position,
       size: size ?? this.size,
       rotation: rotation ?? this.rotation,
+      opacity: opacity ?? this.opacity,
       timestamp: timestamp ?? this.timestamp,
     );
   }
@@ -53,6 +57,7 @@ class CanvasImage {
       'width': size.width,
       'height': size.height,
       'rotation': rotation,
+      'opacity': opacity,
       'timestamp': timestamp,
     };
   }
@@ -70,6 +75,7 @@ class CanvasImage {
         (json['height'] as num).toDouble(),
       ),
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0.0,
+      opacity: (json['opacity'] as num?)?.toDouble() ?? 1.0,
       timestamp: json['timestamp'] as int,
     );
   }

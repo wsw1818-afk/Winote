@@ -74,6 +74,15 @@ class CanvasText {
     );
   }
 
+  /// Check if a point is inside this text box (approximate bounds)
+  bool containsPoint(Offset point) {
+    // Approximate text bounds: width based on text length and font size
+    final estimatedWidth = text.length * fontSize * 0.6;
+    final estimatedHeight = fontSize * 1.5;
+    final bounds = Rect.fromLTWH(position.dx, position.dy, estimatedWidth.clamp(50, 500), estimatedHeight);
+    return bounds.contains(point);
+  }
+
   @override
   String toString() => 'CanvasText(id: $id, text: "$text", position: $position)';
 }
