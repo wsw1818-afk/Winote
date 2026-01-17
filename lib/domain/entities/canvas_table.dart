@@ -92,6 +92,45 @@ class CanvasTable {
     return bounds.contains(point);
   }
 
+  /// Check if a point is near the border of this table (for eraser detection)
+  /// Returns true if point is within tolerance of any border line
+  bool isNearBorder(Offset point, {double tolerance = 20.0}) {
+    final rect = bounds;
+
+    // Check if point is near left edge
+    if (point.dy >= rect.top - tolerance && point.dy <= rect.bottom + tolerance) {
+      if ((point.dx - rect.left).abs() <= tolerance) return true;
+      if ((point.dx - rect.right).abs() <= tolerance) return true;
+    }
+
+    // Check if point is near top/bottom edge
+    if (point.dx >= rect.left - tolerance && point.dx <= rect.right + tolerance) {
+      if ((point.dy - rect.top).abs() <= tolerance) return true;
+      if ((point.dy - rect.bottom).abs() <= tolerance) return true;
+    }
+
+    // Check internal grid lines
+    // Vertical lines (column borders)
+    if (point.dy >= rect.top - tolerance && point.dy <= rect.bottom + tolerance) {
+      double x = position.dx;
+      for (int i = 0; i < columns; i++) {
+        x += getColumnWidth(i);
+        if ((point.dx - x).abs() <= tolerance) return true;
+      }
+    }
+
+    // Horizontal lines (row borders)
+    if (point.dx >= rect.left - tolerance && point.dx <= rect.right + tolerance) {
+      double y = position.dy;
+      for (int i = 0; i < rows; i++) {
+        y += getRowHeight(i);
+        if ((point.dy - y).abs() <= tolerance) return true;
+      }
+    }
+
+    return false;
+  }
+
   /// Get the cell at a specific point
   ({int row, int col})? getCellAt(Offset point) {
     if (!containsPoint(point)) return null;
@@ -137,29 +176,29 @@ class CanvasTable {
 
   /// Check if a point is on the left edge of the table (for drag detection)
   /// Returns true if point is within tolerance of the left border
-  bool isOnLeftEdge(Offset point, {double tolerance = 15.0}) {
-    // Check if Y is within table height
-    if (point.dy < position.dy - tolerance || point.dy > position.dy + height + tolerance) {
+  bool isOnLeftEdge(Offset point, {double tolerance = 3.0}) {
+    // Check if Y is within table height (strict 3px margin)
+    if (point.dy < position.dy - 3 || point.dy > position.dy + height + 3) {
       return false;
     }
-    // Check if X is near the left edge
+    // Check if X is near the left edge (strict tolerance)
     return (point.dx - position.dx).abs() <= tolerance;
   }
 
   /// Check if a point is on the top edge of the table (for height resize)
   /// Returns true if point is within tolerance of the top border
-  bool isOnTopEdge(Offset point, {double tolerance = 15.0}) {
-    // Check if X is within table width
-    if (point.dx < position.dx - tolerance || point.dx > position.dx + width + tolerance) {
+  bool isOnTopEdge(Offset point, {double tolerance = 3.0}) {
+    // Check if X is within table width (strict 3px margin)
+    if (point.dx < position.dx - 3 || point.dx > position.dx + width + 3) {
       return false;
     }
-    // Check if Y is near the top edge
+    // Check if Y is near the top edge (strict tolerance)
     return (point.dy - position.dy).abs() <= tolerance;
   }
 
   /// Check if a point is near a column border (for resize detection)
   /// Returns column index (right border of that column) or -1 if not near any border
-  int getColumnBorderAt(Offset point, {double tolerance = 8.0}) {
+  int getColumnBorderAt(Offset point, {double tolerance = 5.0}) {
     if (point.dy < position.dy || point.dy > position.dy + height) return -1;
 
     double x = position.dx;
@@ -174,7 +213,7 @@ class CanvasTable {
 
   /// Check if a point is near a row border (for resize detection)
   /// Returns row index (bottom border of that row) or -1 if not near any border
-  int getRowBorderAt(Offset point, {double tolerance = 8.0}) {
+  int getRowBorderAt(Offset point, {double tolerance = 5.0}) {
     if (point.dx < position.dx || point.dx > position.dx + width) return -1;
 
     double y = position.dy;

@@ -51,7 +51,7 @@ class DrawingCanvas extends StatefulWidget {
     this.toolType = ToolType.pen,
     this.drawingTool = DrawingTool.pen,
     this.onStrokesChanged,
-    this.showDebugOverlay = true,
+    this.showDebugOverlay = false,
     this.initialStrokes,
     this.onUndo,
     this.onRedo,
@@ -141,6 +141,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   // Eraser tracking
   Offset? _lastErasePoint;
 
+  /// 지우개 반경 계산 (커서와 실제 지우기 반경 일치)
+  double get _eraserRadius => math.max(20.0, widget.strokeWidth * 2.5);
+
   // Lasso selection
   List<Offset> _lassoPath = [];
   Set<String> _selectedStrokeIds = {};
@@ -200,10 +203,18 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   String? _readyToDragTableId;
   String? _readyToDragShapeId;
 
+  // 삭제 버튼 표시 상태 (1초 롱프레스 후 표시)
+  String? _showDeleteButtonForTableId;
+  String? _showDeleteButtonForImageId;
+  static const double _deleteButtonSize = 32.0;
+  static const double _deleteButtonOffset = 10.0; // 오른쪽 상단에서 떨어진 거리
+
   // Table cell border resize state (long press activated)
   bool _isResizingTableBorder = false;
-  bool _isWaitingForResizeLongPress = false; // Waiting for long press on border
+  bool _isWaitingForResizeLongPress = false; // Waiting for long press on border (visual feedback)
+  bool _isPendingResizeLongPress = false; // Touch detected, waiting for 0.5s before showing visual
   Timer? _resizeLongPressTimer;
+  Timer? _resizeVisualFeedbackTimer; // Timer for 0.5s visual feedback delay
   String? _resizingTableId;
   int _resizingColumnIndex = -1; // Column index being resized (-1 = none)
   int _resizingRowIndex = -1; // Row index being resized (-1 = none)
@@ -212,7 +223,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   double _originalColumnWidth = 0;
   double _originalRowHeight = 0;
   Offset _resizeBorderStartPos = Offset.zero; // Position where border was touched
-  static const Duration _resizeLongPressDuration = Duration(milliseconds: 1000); // 1 second
+  static const Duration _resizeLongPressDuration = Duration(milliseconds: 500); // 0.5 second for activation
+  static const Duration _resizeVisualFeedbackDelay = Duration(milliseconds: 300); // 0.3 second for visual
+  static const double _resizeMovementThreshold = 20.0; // 20px movement allowed before cancel
 
   @override
   void initState() {
@@ -247,7 +260,18 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   @override
   void dispose() {
+    // 모든 Timer 정리 (메모리 누수 방지)
     _longPressTimer?.cancel();
+    _resizeLongPressTimer?.cancel();
+    _resizeVisualFeedbackTimer?.cancel();
+    _imageDeleteLongPressTimer?.cancel();
+
+    // 이미지 캐시 정리
+    for (final image in _loadedImages.values) {
+      image.dispose();
+    }
+    _loadedImages.clear();
+
     super.dispose();
   }
 
@@ -373,9 +397,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         '---\n\n',
       );
 
-      print('[WINOTE] Log file created: $logPath');
+      // 로그 파일 생성됨 (디버그 print 제거)
     } catch (e) {
-      print('[WINOTE] Log file init failed: $e');
+      // 로그 파일 초기화 실패 (무시)
     }
   }
 
@@ -420,7 +444,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   void _cancelResizeLongPressState({String reason = 'cancelled'}) {
     _resizeLongPressTimer?.cancel();
     _resizeLongPressTimer = null;
+    _resizeVisualFeedbackTimer?.cancel();
+    _resizeVisualFeedbackTimer = null;
     _isWaitingForResizeLongPress = false;
+    _isPendingResizeLongPress = false;
     _resizingTableId = null;
     _resizingColumnIndex = -1;
     _resizingRowIndex = -1;
@@ -428,9 +455,21 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _perfLog('TABLE_RESIZE_LONGPRESS_CANCELLED', inputType: reason);
   }
 
-  // Enable performance profiling log
-  static const bool _enableVerboseLogging = false;  // 성능 최적화 (디버깅 시 true로 변경)
-  static const bool _enablePerformanceLog = true;
+  /// Save current stroke if exists (used when switching to resize/drag mode)
+  void _saveCurrentStrokeIfExists() {
+    if (_currentStroke != null && _currentStroke!.points.length >= 2) {
+      setState(() {
+        _strokes.add(_currentStroke!);
+      });
+      _perfLog('STROKE_SAVED_BEFORE_MODE_SWITCH', inputType: 'pts=${_currentStroke!.points.length}');
+      widget.onStrokesChanged?.call(_strokes);
+    }
+    _currentStroke = null;
+  }
+
+  // Enable performance profiling log (Release 빌드에서는 false로 유지)
+  static const bool _enableVerboseLogging = true;  // 디버그용 활성화
+  static const bool _enablePerformanceLog = true;  // 디버그용 활성화
 
   // Performance tracking
   int _frameCount = 0;
@@ -479,9 +518,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                     painter: _TemplatePainter(template: widget.pageTemplate),
                     size: Size.infinite,
                   ),
-                  // Images layer
+                  // Images layer (key 단순화: 개수 + 선택 상태만)
                   RepaintBoundary(
-                    key: ValueKey('images_${_images.length}_${_images.map((i) => i.id).join('_')}_sel_$_selectedImageId'),
+                    key: ValueKey('images_${_images.length}_$_selectedImageId'),
                     child: CustomPaint(
                       painter: _ImagePainter(
                         images: _images,
@@ -491,18 +530,20 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                       size: Size.infinite,
                     ),
                   ),
-                  // Shapes layer (드래그 중 실시간 업데이트를 위해 key 사용)
-                  CustomPaint(
-                    key: ValueKey('shapes_${_shapes.length}_${_shapes.map((s) => '${s.id}_${s.startPoint.dx.toInt()}_${s.startPoint.dy.toInt()}').join('_')}'),
-                    painter: _ShapePainter(
-                      shapes: _shapes,
-                      selectedShapeId: _selectedShapeId,
+                  // Shapes layer (key 단순화)
+                  RepaintBoundary(
+                    key: ValueKey('shapes_${_shapes.length}_$_selectedShapeId'),
+                    child: CustomPaint(
+                      painter: _ShapePainter(
+                        shapes: _shapes,
+                        selectedShapeId: _selectedShapeId,
+                      ),
+                      size: Size.infinite,
                     ),
-                    size: Size.infinite,
                   ),
-                  // Tables layer (드래그 중 실시간 업데이트를 위해 key 사용)
+                  // Tables layer - 드래그/리사이즈 중에는 매 프레임 업데이트 필요
+                  // RepaintBoundary 제거하여 실시간 렌더링 보장
                   CustomPaint(
-                    key: ValueKey('tables_${_tables.length}_${_tables.map((t) => '${t.id}_${t.position.dx.toInt()}_${t.position.dy.toInt()}').join('_')}_ready_${_readyToDragTableId ?? ""}_drag_${_isDraggingTable ? _selectedTableId : ""}_resize_${_isWaitingForResizeLongPress || _isResizingTableBorder ? _resizingTableId : ""}_col_${_resizingColumnIndex}_row_${_resizingRowIndex}_active_$_isResizingTableBorder'),
                     painter: _TablePainter(
                       tables: _tables,
                       selectedTableId: _selectedTableId,
@@ -514,9 +555,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                     ),
                     size: Size.infinite,
                   ),
-                  // Text layer
+                  // Text layer (key 단순화)
                   RepaintBoundary(
-                    key: ValueKey('texts_${_texts.length}_${_texts.map((t) => t.id).join('_')}_sel_$_selectedTextId'),
+                    key: ValueKey('texts_${_texts.length}_$_selectedTextId'),
                     child: CustomPaint(
                       painter: _TextPainter(
                         texts: _texts,
@@ -526,14 +567,15 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                     ),
                   ),
                   // Drawing area with RepaintBoundary for performance
+                  // 지우개 사용 시에는 RepaintBoundary 비활성화하여 커서가 부드럽게 따라오도록 함
                   RepaintBoundary(
-                    key: ValueKey('strokes_${_strokes.length}_${_selectedStrokeIds.length}_lasso_${_lassoPath.length}'),
+                    key: ValueKey('strokes_${_strokes.length}_${_selectedStrokeIds.length}_${_lastErasePoint?.dx.toInt()}_${_lastErasePoint?.dy.toInt()}'),
                     child: CustomPaint(
                       painter: _StrokePainter(
                         strokes: _strokes,
                         currentStroke: _currentStroke,
                         eraserPosition: widget.drawingTool == DrawingTool.eraser ? _lastErasePoint : null,
-                        eraserRadius: widget.strokeWidth / 2,
+                        eraserRadius: _eraserRadius,
                         lassoPath: _lassoPath,
                         selectedStrokeIds: _selectedStrokeIds,
                         selectionOffset: _selectionOffset,
@@ -634,6 +676,12 @@ class DrawingCanvasState extends State<DrawingCanvas> {
               ),
             ),
           ),
+        // 표 삭제 버튼 (1초 롱프레스 후 표시)
+        if (_showDeleteButtonForTableId != null)
+          _buildDeleteButtonForTable(),
+        // 이미지 삭제 버튼 (1초 롱프레스 후 표시)
+        if (_showDeleteButtonForImageId != null)
+          _buildDeleteButtonForImage(),
         // Zoom controls
         Positioned(
           bottom: 16,
@@ -652,6 +700,142 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     );
       },
     );
+  }
+
+  /// 표 삭제 버튼 위젯 (오른쪽 상단 대각선)
+  Widget _buildDeleteButtonForTable() {
+    final table = _tables.where((t) => t.id == _showDeleteButtonForTableId).firstOrNull;
+    if (table == null) return const SizedBox.shrink();
+
+    // 캔버스 좌표를 화면 좌표로 변환
+    final screenPos = _canvasToScreen(Offset(
+      table.position.dx + table.width + _deleteButtonOffset,
+      table.position.dy - _deleteButtonSize - _deleteButtonOffset,
+    ));
+
+    return Positioned(
+      left: screenPos.dx - _deleteButtonSize / 2,
+      top: screenPos.dy,
+      child: GestureDetector(
+        onTap: _deleteSelectedTable,
+        child: Container(
+          width: _deleteButtonSize,
+          height: _deleteButtonSize,
+          decoration: BoxDecoration(
+            color: Colors.red,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.3),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: const Icon(
+            Icons.close,
+            color: Colors.white,
+            size: 20,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 이미지 삭제 버튼 위젯 (오른쪽 상단 대각선)
+  Widget _buildDeleteButtonForImage() {
+    final image = _images.where((img) => img.id == _showDeleteButtonForImageId).firstOrNull;
+    if (image == null) return const SizedBox.shrink();
+
+    // 캔버스 좌표를 화면 좌표로 변환
+    final screenPos = _canvasToScreen(Offset(
+      image.position.dx + image.size.width + _deleteButtonOffset,
+      image.position.dy - _deleteButtonSize - _deleteButtonOffset,
+    ));
+
+    return Positioned(
+      left: screenPos.dx - _deleteButtonSize / 2,
+      top: screenPos.dy,
+      child: GestureDetector(
+        onTap: _deleteSelectedImage,
+        child: Container(
+          width: _deleteButtonSize,
+          height: _deleteButtonSize,
+          decoration: BoxDecoration(
+            color: Colors.red,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.3),
+                blurRadius: 4,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: const Icon(
+            Icons.close,
+            color: Colors.white,
+            size: 20,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 선택된 표 삭제
+  void _deleteSelectedTable() {
+    if (_showDeleteButtonForTableId == null) return;
+
+    _saveState();
+    setState(() {
+      _tables.removeWhere((t) => t.id == _showDeleteButtonForTableId);
+      if (_selectedTableId == _showDeleteButtonForTableId) {
+        _selectedTableId = null;
+        widget.onTableSelectionChanged?.call(false);
+      }
+      _showDeleteButtonForTableId = null;
+    });
+    widget.onTablesChanged?.call(_tables);
+  }
+
+  /// 선택된 이미지 삭제
+  void _deleteSelectedImage() {
+    if (_showDeleteButtonForImageId == null) return;
+
+    _saveState();
+    setState(() {
+      final imageToRemove = _images.where((img) => img.id == _showDeleteButtonForImageId).firstOrNull;
+      if (imageToRemove != null) {
+        _images.remove(imageToRemove);
+        _loadedImages[imageToRemove.id]?.dispose();
+        _loadedImages.remove(imageToRemove.id);
+      }
+      if (_selectedImageId == _showDeleteButtonForImageId) {
+        _selectedImageId = null;
+        widget.onImageSelectionChanged?.call(false);
+      }
+      _showDeleteButtonForImageId = null;
+    });
+    widget.onImagesChanged?.call(_images);
+  }
+
+  // 이미지 삭제 버튼 롱프레스 타이머
+  Timer? _imageDeleteLongPressTimer;
+
+  void _startImageDeleteLongPressTimer(String imageId) {
+    _imageDeleteLongPressTimer?.cancel();
+    _imageDeleteLongPressTimer = Timer(Duration(milliseconds: _longPressDuration), () {
+      if (mounted && _selectedImageId == imageId) {
+        setState(() {
+          _showDeleteButtonForImageId = imageId;
+        });
+      }
+    });
+  }
+
+  void _cancelImageDeleteLongPressTimer() {
+    _imageDeleteLongPressTimer?.cancel();
+    _imageDeleteLongPressTimer = null;
   }
 
   Widget _buildZoomButton(IconData icon, VoidCallback onPressed) {
@@ -824,6 +1008,11 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     return (screenPos - _offset) / _scale;
   }
 
+  /// 캔버스 좌표를 화면 좌표로 변환
+  Offset _canvasToScreen(Offset canvasPos) {
+    return canvasPos * _scale + _offset;
+  }
+
   void _onPointerDown(PointerDownEvent event) {
     final startTime = DateTime.now().millisecondsSinceEpoch;
 
@@ -893,10 +1082,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           }
         }
       }
-      // Check tables
+      // Check tables (테두리 근처에서만 인식 - 3px로 더 좁게)
       if (!tappedOnElement) {
         for (final table in _tables) {
-          if (table.containsPoint(canvasPosForElementCheck)) {
+          if (table.isNearBorder(canvasPosForElementCheck, tolerance: 3.0)) {
             tappedOnElement = true;
             break;
           }
@@ -1012,9 +1201,13 @@ class DrawingCanvasState extends State<DrawingCanvas> {
             setState(() {
               _selectedImageId = image.id;
               _selectedTextId = null;
+              _showDeleteButtonForImageId = null; // 이전 삭제 버튼 숨기기
+              _showDeleteButtonForTableId = null;
             });
             widget.onImageSelectionChanged?.call(true);
           }
+          // 삭제 버튼 롱프레스 타이머 시작 (1초)
+          _startImageDeleteLongPressTimer(image.id);
           setState(() {
             _lastDeviceKind = 'Image';
           });
@@ -1122,37 +1315,59 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     }
 
     // Check for table interactions - cell borders for resize, left edge for drag
-    // Both require 1 second long press
+    // Both require 0.5 second for visual feedback, 1 second for activation
     // NOTE: Check cell borders FIRST (tolerance: 6.0), then left edge (tolerance: 15.0)
     //       to avoid left edge capturing cell border touches
+    _perfLog('TABLE_CHECK', inputType: 'tool=${widget.drawingTool}, tables=${_tables.length}', pos: canvasPosForHitTest);
     for (int i = _tables.length - 1; i >= 0; i--) {
       final table = _tables[i];
 
+      // Check if touch is within table bounds first
+      final tableRect = Rect.fromLTWH(table.position.dx, table.position.dy, table.width, table.height);
+      final isInTableArea = tableRect.inflate(20).contains(canvasPosForHitTest); // 20px margin for border detection
+
       // First check: Column border for resize (higher priority than left edge)
       final colBorder = table.getColumnBorderAt(canvasPosForHitTest, tolerance: 6.0);
+      final rowBorder = table.getRowBorderAt(canvasPosForHitTest, tolerance: 6.0);
+
+      if (isInTableArea) {
+        _perfLog('TABLE_BORDER_CHECK', inputType: 'table=$i, inArea=$isInTableArea, colBorder=$colBorder, rowBorder=$rowBorder', pos: canvasPosForHitTest);
+      }
+
       if (colBorder >= 0) {
-        // Start waiting for long press
-        _isWaitingForResizeLongPress = true;
+        // Start pending state (no visual feedback yet)
+        _isPendingResizeLongPress = true;
         _resizingTableId = table.id;
         _resizingColumnIndex = colBorder;
         _resizingRowIndex = -1;
         _resizeBorderStartPos = canvasPosForHitTest;
         _originalColumnWidth = table.getColumnWidth(colBorder);
-        setState(() {}); // Trigger repaint to show visual feedback
-        _perfLog('TABLE_COLUMN_RESIZE_WAITING', inputType: 'col=$colBorder', pos: canvasPosForHitTest);
+        _perfLog('TABLE_COLUMN_RESIZE_PENDING', inputType: 'col=$colBorder', pos: canvasPosForHitTest);
 
-        // Start 1 second timer for long press
+        // Start 0.5 second timer for visual feedback
+        _resizeVisualFeedbackTimer?.cancel();
+        _resizeVisualFeedbackTimer = Timer(_resizeVisualFeedbackDelay, () {
+          if (_isPendingResizeLongPress && _resizingTableId != null && mounted) {
+            _isWaitingForResizeLongPress = true;
+            setState(() {}); // Now show visual feedback
+            _perfLog('TABLE_COLUMN_RESIZE_VISUAL', inputType: 'col=$colBorder', pos: canvasPosForHitTest);
+          }
+        });
+
+        // Start 1 second timer for long press activation
         _resizeLongPressTimer?.cancel();
         _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
-          if (_isWaitingForResizeLongPress && _resizingTableId != null && mounted) {
+          if (_isPendingResizeLongPress && _resizingTableId != null && mounted) {
             // Long press triggered - activate resize mode
+            _isPendingResizeLongPress = false;
             _isWaitingForResizeLongPress = false;
             _isResizingTableBorder = true;
             _resizeStartX = _resizeBorderStartPos.dx;
-            // Cancel any drawing in progress
-            _currentStroke = null;
+            // Save any drawing in progress before switching to resize mode
+            _saveCurrentStrokeIfExists();
             setState(() {
               _selectedTableId = _resizingTableId;
+              _showDeleteButtonForTableId = _resizingTableId; // 삭제 버튼 표시
               _lastDeviceKind = 'Table (resize column - active)';
             });
             _perfLog('TABLE_COLUMN_RESIZE_ACTIVATED', inputType: 'col=$_resizingColumnIndex', pos: _resizeBorderStartPos);
@@ -1162,66 +1377,86 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         break;
       }
 
-      // Second check: Row border for resize
-      final rowBorder = table.getRowBorderAt(canvasPosForHitTest, tolerance: 6.0);
+      // Second check: Row border for resize (already computed above)
       if (rowBorder >= 0) {
-        // Start waiting for long press
-        _isWaitingForResizeLongPress = true;
+        // Start pending state (no visual feedback yet)
+        _isPendingResizeLongPress = true;
         _resizingTableId = table.id;
         _resizingColumnIndex = -1;
         _resizingRowIndex = rowBorder;
         _resizeBorderStartPos = canvasPosForHitTest;
         _originalRowHeight = table.getRowHeight(rowBorder);
-        setState(() {}); // Trigger repaint to show visual feedback
-        _perfLog('TABLE_ROW_RESIZE_WAITING', inputType: 'row=$rowBorder', pos: canvasPosForHitTest);
+        _perfLog('TABLE_ROW_RESIZE_PENDING', inputType: 'row=$rowBorder', pos: canvasPosForHitTest);
 
-        // Start 1 second timer for long press
+        // Start 0.5 second timer for visual feedback
+        _resizeVisualFeedbackTimer?.cancel();
+        _resizeVisualFeedbackTimer = Timer(_resizeVisualFeedbackDelay, () {
+          if (_isPendingResizeLongPress && _resizingTableId != null && mounted) {
+            _isWaitingForResizeLongPress = true;
+            setState(() {}); // Now show visual feedback
+            _perfLog('TABLE_ROW_RESIZE_VISUAL', inputType: 'row=$rowBorder', pos: canvasPosForHitTest);
+          }
+        });
+
+        // Start 1 second timer for long press activation
         _resizeLongPressTimer?.cancel();
         _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
-          if (_isWaitingForResizeLongPress && _resizingTableId != null && mounted) {
+          if (_isPendingResizeLongPress && _resizingTableId != null && mounted) {
             // Long press triggered - activate resize mode
+            _isPendingResizeLongPress = false;
             _isWaitingForResizeLongPress = false;
             _isResizingTableBorder = true;
             _resizeStartY = _resizeBorderStartPos.dy;
-            // Cancel any drawing in progress
-            _currentStroke = null;
+            // Save any drawing in progress before switching to resize mode
+            _saveCurrentStrokeIfExists();
             setState(() {
               _selectedTableId = _resizingTableId;
+              _showDeleteButtonForTableId = _resizingTableId; // 삭제 버튼 표시
               _lastDeviceKind = 'Table (resize row - active)';
             });
             _perfLog('TABLE_ROW_RESIZE_ACTIVATED', inputType: 'row=$_resizingRowIndex', pos: _resizeBorderStartPos);
           }
         });
-        _perfLog('TABLE_ROW_RESIZE_TIMER_STARTED', inputType: 'row=$rowBorder', pos: canvasPosForHitTest);
         // Don't return here - allow drawing to start if threshold not met
         break;
       }
 
       // Third check: Left edge for table drag (lower priority than cell borders)
-      if (table.isOnLeftEdge(canvasPosForHitTest, tolerance: 15.0)) {
-        // Start waiting for long press to drag table
-        _isWaitingForResizeLongPress = true; // Reuse flag for waiting state
+      if (table.isOnLeftEdge(canvasPosForHitTest, tolerance: 3.0)) {
+        // Start pending state (no visual feedback yet)
+        _isPendingResizeLongPress = true;
         _resizingTableId = table.id;
         _resizingColumnIndex = -99; // Special value indicating left edge drag
         _resizingRowIndex = -1;
         _resizeBorderStartPos = canvasPosForHitTest;
-        setState(() {}); // Trigger repaint to show visual feedback
-        _perfLog('TABLE_LEFT_EDGE_WAITING', inputType: 'drag', pos: canvasPosForHitTest);
+        _perfLog('TABLE_LEFT_EDGE_PENDING', inputType: 'drag', pos: canvasPosForHitTest);
 
-        // Start 1 second timer for long press
+        // Start 0.5 second timer for visual feedback
+        _resizeVisualFeedbackTimer?.cancel();
+        _resizeVisualFeedbackTimer = Timer(_resizeVisualFeedbackDelay, () {
+          if (_isPendingResizeLongPress && _resizingTableId != null && _resizingColumnIndex == -99 && mounted) {
+            _isWaitingForResizeLongPress = true;
+            setState(() {}); // Now show visual feedback
+            _perfLog('TABLE_LEFT_EDGE_VISUAL', inputType: 'drag', pos: canvasPosForHitTest);
+          }
+        });
+
+        // Start 1 second timer for long press activation
         _resizeLongPressTimer?.cancel();
         _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
-          if (_isWaitingForResizeLongPress && _resizingTableId != null && _resizingColumnIndex == -99 && mounted) {
+          if (_isPendingResizeLongPress && _resizingTableId != null && _resizingColumnIndex == -99 && mounted) {
             // Long press triggered on left edge - activate drag mode
+            _isPendingResizeLongPress = false;
             _isWaitingForResizeLongPress = false;
             _resizingColumnIndex = -1; // Reset special value
-            // Cancel any drawing in progress
-            _currentStroke = null;
+            // Save any drawing in progress before switching to drag mode
+            _saveCurrentStrokeIfExists();
             // Setup table drag
             _isDraggingTable = true;
             _tableDragStart = _resizeBorderStartPos;
             setState(() {
               _selectedTableId = _resizingTableId;
+              _showDeleteButtonForTableId = _resizingTableId; // 삭제 버튼 표시
               _lastDeviceKind = 'Table (drag from left edge)';
             });
             _perfLog('TABLE_DRAG_FROM_LEFT_EDGE_ACTIVATED', inputType: 'table=${_resizingTableId}', pos: _resizeBorderStartPos);
@@ -1232,29 +1467,40 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       }
 
       // Fourth check: Top edge for table height resize (resize upward)
-      if (table.isOnTopEdge(canvasPosForHitTest, tolerance: 15.0)) {
-        // Start waiting for long press to resize from top
-        _isWaitingForResizeLongPress = true;
+      if (table.isOnTopEdge(canvasPosForHitTest, tolerance: 3.0)) {
+        // Start pending state (no visual feedback yet)
+        _isPendingResizeLongPress = true;
         _resizingTableId = table.id;
         _resizingColumnIndex = -1;
         _resizingRowIndex = -99; // Special value indicating top edge resize
         _resizeBorderStartPos = canvasPosForHitTest;
         _originalRowHeight = table.getRowHeight(0); // First row height
-        setState(() {}); // Trigger repaint to show visual feedback
-        _perfLog('TABLE_TOP_EDGE_WAITING', inputType: 'resize', pos: canvasPosForHitTest);
+        _perfLog('TABLE_TOP_EDGE_PENDING', inputType: 'resize', pos: canvasPosForHitTest);
 
-        // Start 1 second timer for long press
+        // Start 0.5 second timer for visual feedback
+        _resizeVisualFeedbackTimer?.cancel();
+        _resizeVisualFeedbackTimer = Timer(_resizeVisualFeedbackDelay, () {
+          if (_isPendingResizeLongPress && _resizingTableId != null && _resizingRowIndex == -99 && mounted) {
+            _isWaitingForResizeLongPress = true;
+            setState(() {}); // Now show visual feedback
+            _perfLog('TABLE_TOP_EDGE_VISUAL', inputType: 'resize', pos: canvasPosForHitTest);
+          }
+        });
+
+        // Start 1 second timer for long press activation
         _resizeLongPressTimer?.cancel();
         _resizeLongPressTimer = Timer(_resizeLongPressDuration, () {
-          if (_isWaitingForResizeLongPress && _resizingTableId != null && _resizingRowIndex == -99 && mounted) {
+          if (_isPendingResizeLongPress && _resizingTableId != null && _resizingRowIndex == -99 && mounted) {
             // Long press triggered on top edge - activate resize mode
+            _isPendingResizeLongPress = false;
             _isWaitingForResizeLongPress = false;
             _isResizingTableBorder = true;
             _resizeStartY = _resizeBorderStartPos.dy;
-            // Cancel any drawing in progress
-            _currentStroke = null;
+            // Save any drawing in progress before switching to resize mode
+            _saveCurrentStrokeIfExists();
             setState(() {
               _selectedTableId = _resizingTableId;
+              _showDeleteButtonForTableId = _resizingTableId; // 삭제 버튼 표시
               _lastDeviceKind = 'Table (resize top edge - active)';
             });
             _perfLog('TABLE_TOP_EDGE_RESIZE_ACTIVATED', inputType: 'table=${_resizingTableId}', pos: _resizeBorderStartPos);
@@ -1267,20 +1513,20 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     // Check for table tap (selection and dragging) - only when NOT drawing
     // Skip if waiting for resize long press (border resize takes priority)
-    if (!isDrawingOrEraserTool && !_isWaitingForResizeLongPress) {
+    // 셀 테두리 근처에서만 선택/드래그 인식 (셀 내부 터치는 무시)
+    // ★ 1초 롱프레스 후에만 표 선택이 되도록 변경
+    if (!isDrawingOrEraserTool && !_isWaitingForResizeLongPress && !_isPendingResizeLongPress) {
+      debugPrint('TABLE_CHECK: tables=${_tables.length}, pos=$canvasPosForHitTest');
       for (int i = _tables.length - 1; i >= 0; i--) {
         final table = _tables[i];
-        if (table.containsPoint(canvasPosForHitTest)) {
-          // Select the table
-          setState(() {
-            _selectedTableId = table.id;
-            _selectedImageId = null;
-            _selectedTextId = null;
-            _selectedShapeId = null;
-          });
-          widget.onTableSelectionChanged?.call(true);
-          widget.onImageSelectionChanged?.call(false);
-          widget.onShapeSelectionChanged?.call(false);
+        final isNear = table.isNearBorder(canvasPosForHitTest, tolerance: 3.0);
+        final isInside = table.containsPoint(canvasPosForHitTest);
+        debugPrint('TABLE[$i]: id=${table.id}, pos=${table.position}, isNearBorder=$isNear, containsPoint=$isInside');
+        // 셀 테두리 근처에서만 인식 (tolerance: 3px로 더 좁게)
+        if (isNear) {
+          debugPrint('TABLE_PENDING: ${table.id} (1초 후 선택됨)');
+          // ★ 즉시 선택하지 않고 pending 상태로만 설정
+          // 1초 후 롱프레스 시에만 선택됨
 
           // Setup for long press drag (wait before enabling drag)
           _longPressTimer?.cancel();
@@ -1291,17 +1537,33 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           _longPressTriggered = false;
           _tableDragStart = canvasPosForHitTest;
 
-          // 1초 후 롱프레스 트리거 (타이머 사용)
+          // 1초 후 롱프레스 트리거 (타이머 사용) - 선택, 드래그 및 삭제 버튼 표시
+          debugPrint('TABLE_TIMER_START: tableId=${table.id}, duration=${_longPressDuration}ms');
           _perfLog('TIMER_START', inputType: 'select-table:${table.id}', pos: canvasPosForHitTest);
+          final tableIdForTimer = table.id; // 클로저에서 사용할 ID 저장
           _longPressTimer = Timer(Duration(milliseconds: _longPressDuration), () {
+            debugPrint('TABLE_TIMER_FIRED: pendingId=$_pendingDragElementId, triggered=$_longPressTriggered, mounted=$mounted');
             _perfLog('TIMER_FIRED', inputType: 'pendingId=$_pendingDragElementId,triggered=$_longPressTriggered', pos: _elementTapStartPos);
             if (_pendingDragElementId != null && !_longPressTriggered && mounted) {
+              debugPrint('TABLE_SELECTED_AFTER_1SEC: $tableIdForTimer');
+              // ★ 1초 후에 선택 상태로 변경
+              setState(() {
+                _selectedTableId = tableIdForTimer;
+                _selectedImageId = null;
+                _selectedTextId = null;
+                _selectedShapeId = null;
+                _showDeleteButtonForTableId = tableIdForTimer;
+                _showDeleteButtonForImageId = null;
+              });
+              widget.onTableSelectionChanged?.call(true);
+              widget.onImageSelectionChanged?.call(false);
+              widget.onShapeSelectionChanged?.call(false);
               _triggerLongPressDrag();
             }
           });
 
           setState(() {
-            _lastDeviceKind = 'Table (hold to drag)';
+            _lastDeviceKind = 'Table border (hold 1s to select)';
           });
           return;
         }
@@ -1315,7 +1577,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _selectedTextId = null;
         _selectedShapeId = null;
         _selectedTableId = null;
+        _showDeleteButtonForTableId = null; // 삭제 버튼 숨기기
+        _showDeleteButtonForImageId = null;
       });
+      _cancelImageDeleteLongPressTimer();
       widget.onImageSelectionChanged?.call(false);
       widget.onShapeSelectionChanged?.call(false);
       widget.onTableSelectionChanged?.call(false);
@@ -1388,32 +1653,39 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // 펜/하이라이터로 표/도형 위에서 롱프레스 시 드래그 모드 준비
     // (그리기와 동시에 롱프레스 감지)
     // 단, 테이블 경계선 리사이즈 대기 상태일 때는 건너뜀
-    if ((widget.drawingTool == DrawingTool.pen || widget.drawingTool == DrawingTool.highlighter) && !_isWaitingForResizeLongPress) {
+    if ((widget.drawingTool == DrawingTool.pen || widget.drawingTool == DrawingTool.highlighter) && !_isWaitingForResizeLongPress && !_isPendingResizeLongPress) {
       // 기존 타이머 취소
       _longPressTimer?.cancel();
       _longPressTimer = null;
 
       _perfLog('PEN_CHECK_TABLES', inputType: 'tables=${_tables.length}', pos: canvasPos);
 
-      // Check if on a table
+      // Check if on a table border (셀 테두리 3px 이내에서만 인식)
       for (int i = _tables.length - 1; i >= 0; i--) {
         final table = _tables[i];
-        _perfLog('PEN_TABLE_CHECK', inputType: 'bounds=${table.bounds},contains=${table.containsPoint(canvasPos)}', pos: canvasPos);
-        if (table.containsPoint(canvasPos)) {
+        final isNearBorder = table.isNearBorder(canvasPos, tolerance: 3.0);
+        _perfLog('PEN_TABLE_CHECK', inputType: 'bounds=${table.bounds},isNearBorder=$isNearBorder', pos: canvasPos);
+        // 셀 테두리 근처에서만 롱프레스 드래그 인식 (셀 내부에서는 그냥 필기)
+        if (isNearBorder) {
           _elementTapStartTime = DateTime.now().millisecondsSinceEpoch;
           _elementTapStartPos = canvasPos;
           _pendingDragElementId = table.id;
           _pendingDragElementType = 'table';
           _longPressTriggered = false;
           _tableDragStart = canvasPos;
-          // 펜으로 표 위 롱프레스 시에도 selectedTableId 설정 (드래그 시 필요)
-          _selectedTableId = table.id;
+          // 펜으로 표 테두리 롱프레스 시 selectedTableId는 롱프레스 트리거 시에만 설정
+          // (그리기 중에는 선택 표시 안함)
 
-          // 1초 후 롱프레스 트리거 (타이머 사용)
+          // 1초 후 롱프레스 트리거 (타이머 사용) - 삭제 버튼 표시 포함
+          final tableIdForTimer = table.id;
           _perfLog('TIMER_START', inputType: 'table:${table.id}', pos: canvasPos);
           _longPressTimer = Timer(Duration(milliseconds: _longPressDuration), () {
             _perfLog('TIMER_FIRED', inputType: 'pendingId=$_pendingDragElementId,triggered=$_longPressTriggered', pos: _elementTapStartPos);
             if (_pendingDragElementId != null && !_longPressTriggered && mounted) {
+              // 삭제 버튼 먼저 표시
+              setState(() {
+                _showDeleteButtonForTableId = tableIdForTimer;
+              });
               _triggerLongPressDrag();
             }
           });
@@ -1431,8 +1703,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
             _pendingDragElementType = 'shape';
             _longPressTriggered = false;
             _shapeDragStart = canvasPos;
-            // 펜으로 도형 위 롱프레스 시에도 selectedShapeId 설정 (드래그 시 필요)
-            _selectedShapeId = shape.id;
+            // 펜으로 도형 위 롱프레스 시 selectedShapeId는 롱프레스 트리거 시에만 설정
+            // (그리기 중에는 선택 표시 안함)
 
             // 1초 후 롱프레스 트리거 (타이머 사용)
             _perfLog('TIMER_START', inputType: 'shape:${shape.id}', pos: canvasPos);
@@ -1496,8 +1768,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   /// Erase strokes at a point
   void _eraseAt(Offset point) {
-    // 지우개 반경: 최소 20px, strokeWidth의 5배 중 큰 값 사용
-    final eraserRadius = math.max(20.0, widget.strokeWidth * 5);
+    // 지우개 반경: _eraserRadius 사용 (커서와 동일)
+    final eraserRadius = _eraserRadius;
     final toRemove = <Stroke>[];
 
     for (int idx = 0; idx < _strokes.length; idx++) {
@@ -1597,26 +1869,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       widget.onShapesChanged?.call(_shapes);
     }
 
-    // Also check CanvasTables for erasing
-    final tablesToRemove = <CanvasTable>[];
-    for (final table in _tables) {
-      if (table.containsPoint(point)) {
-        tablesToRemove.add(table);
-      }
-    }
-    if (tablesToRemove.isNotEmpty) {
-      setState(() {
-        for (final table in tablesToRemove) {
-          _tables.remove(table);
-        }
-        // Clear selection if selected table was erased
-        if (_selectedTableId != null && tablesToRemove.any((t) => t.id == _selectedTableId)) {
-          _selectedTableId = null;
-          widget.onTableSelectionChanged?.call(false);
-        }
-      });
-      widget.onTablesChanged?.call(_tables);
-    }
+    // 표(Table)와 이미지(Image)는 지우개로 삭제하지 않음
+    // 실수로 삭제되는 것을 방지하기 위해 선택 후 삭제 버튼으로만 삭제 가능
   }
 
   /// 점에서 선분까지의 최단 거리 계산
@@ -1726,12 +1980,12 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     }
 
     // Check if waiting for resize long press - cancel if moved too much
-    if (_isWaitingForResizeLongPress && _resizingTableId != null) {
+    if ((_isWaitingForResizeLongPress || _isPendingResizeLongPress) && _resizingTableId != null) {
       final canvasPos = _screenToCanvas(event.localPosition);
       final moveDistance = (canvasPos - _resizeBorderStartPos).distance;
 
-      // Cancel long press if moved more than 10px
-      if (moveDistance > 10.0) {
+      // Cancel long press if moved more than threshold (20px)
+      if (moveDistance > _resizeMovementThreshold) {
         _cancelResizeLongPressState(reason: 'moved too much');
       }
     }
@@ -2139,13 +2393,16 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     }
 
     // Handle table border resize end (or long press waiting cleanup)
-    if (_isResizingTableBorder || _isWaitingForResizeLongPress) {
+    if (_isResizingTableBorder || _isWaitingForResizeLongPress || _isPendingResizeLongPress) {
       _activePointerId = null;
       final wasActualResize = _isResizingTableBorder;
       _resizeLongPressTimer?.cancel();
       _resizeLongPressTimer = null;
+      _resizeVisualFeedbackTimer?.cancel();
+      _resizeVisualFeedbackTimer = null;
       _isResizingTableBorder = false;
       _isWaitingForResizeLongPress = false;
+      _isPendingResizeLongPress = false;
       _resizingTableId = null;
       _resizingColumnIndex = -1;
       _resizingRowIndex = -1;
@@ -2153,6 +2410,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       if (wasActualResize) {
         _perfLog('TABLE_RESIZE_END', inputType: 'resize complete');
       } else {
+        // Save any stroke drawn during the waiting period (before 0.5s timeout)
+        _saveCurrentStrokeIfExists();
         _perfLog('TABLE_RESIZE_WAITING_END', inputType: 'long press not triggered');
       }
       return;
@@ -3260,8 +3519,6 @@ class _LassoOverlayPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (lassoPath.isEmpty) return;
 
-    debugPrint('[LASSO OVERLAY] Drawing ${lassoPath.length} points');
-
     // Convert canvas coordinates to screen coordinates
     final screenPath = lassoPath.map((p) {
       return Offset(
@@ -3534,9 +3791,6 @@ class _StrokePainter extends CustomPainter {
     // Draw lasso path - only when selection is complete (selectedStrokeIds.isNotEmpty)
     // During drawing, lasso path is rendered by _LassoOverlayPainter (outside RepaintBoundary)
     if (lassoPath.isNotEmpty && selectedStrokeIds.isNotEmpty) {
-      // 디버그: 선택 완료 후 올가미 경로 그리기
-      debugPrint('[PAINT] Drawing completed lasso path with ${lassoPath.length} points');
-
       // Semi-transparent fill for selected area
       final lassoFillPaint = Paint()
         ..color = lassoColor.withOpacity(0.08)
@@ -3864,6 +4118,15 @@ class _ImagePainter extends CustomPainter {
     if (images.length != oldDelegate.images.length) return true;
     if (selectedImageId != oldDelegate.selectedImageId) return true;
     if (loadedImages.length != oldDelegate.loadedImages.length) return true;
+    // 이미지 위치/크기/회전 변경 감지
+    for (int i = 0; i < images.length; i++) {
+      if (i >= oldDelegate.images.length) return true;
+      final img = images[i];
+      final oldImg = oldDelegate.images[i];
+      if (img.position != oldImg.position) return true;
+      if (img.size != oldImg.size) return true;
+      if (img.rotation != oldImg.rotation) return true;
+    }
     return false;
   }
 }
@@ -4265,11 +4528,21 @@ class _TablePainter extends CustomPainter {
     if (resizeWaitingColumnIndex != oldDelegate.resizeWaitingColumnIndex) return true;
     if (resizeWaitingRowIndex != oldDelegate.resizeWaitingRowIndex) return true;
     if (isResizeActive != oldDelegate.isResizeActive) return true;
-    // 표 위치/크기 변경 감지
+    // 표 위치/크기/열폭/행높이 변경 감지
     for (int i = 0; i < tables.length; i++) {
-      if (tables[i].position != oldDelegate.tables[i].position) return true;
-      if (tables[i].rows != oldDelegate.tables[i].rows) return true;
-      if (tables[i].columns != oldDelegate.tables[i].columns) return true;
+      final table = tables[i];
+      final oldTable = oldDelegate.tables[i];
+      if (table.position != oldTable.position) return true;
+      if (table.rows != oldTable.rows) return true;
+      if (table.columns != oldTable.columns) return true;
+      // 열 폭 변경 감지
+      for (int c = 0; c < table.columns; c++) {
+        if (table.getColumnWidth(c) != oldTable.getColumnWidth(c)) return true;
+      }
+      // 행 높이 변경 감지
+      for (int r = 0; r < table.rows; r++) {
+        if (table.getRowHeight(r) != oldTable.getRowHeight(r)) return true;
+      }
     }
     return false;
   }
