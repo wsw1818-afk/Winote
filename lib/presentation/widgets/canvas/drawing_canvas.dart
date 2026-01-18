@@ -20,6 +20,8 @@ import '../../../core/providers/drawing_state.dart';
 class DrawingCanvas extends StatefulWidget {
   final Color strokeColor;
   final double strokeWidth;
+  final double eraserWidth;
+  final double highlighterOpacity; // 형광펜 투명도
   final ToolType toolType;
   final DrawingTool drawingTool;
   final void Function(List<Stroke>)? onStrokesChanged;
@@ -35,6 +37,7 @@ class DrawingCanvas extends StatefulWidget {
   final List<CanvasText>? initialTexts;
   final void Function(List<CanvasText>)? onTextsChanged;
   final Color lassoColor;
+  final Color laserPointerColor;
   final void Function(bool hasSelection)? onImageSelectionChanged;
   final List<CanvasShape>? initialShapes;
   final void Function(List<CanvasShape>)? onShapesChanged;
@@ -43,11 +46,14 @@ class DrawingCanvas extends StatefulWidget {
   final void Function(List<CanvasTable>)? onTablesChanged;
   final void Function(bool hasSelection)? onTableSelectionChanged;
   final void Function(double scale, Offset offset)? onTransformChanged;
+  final bool presentationHighlighterFadeEnabled;
 
   const DrawingCanvas({
     super.key,
     this.strokeColor = Colors.black,
     this.strokeWidth = 2.0,
+    this.eraserWidth = 20.0,
+    this.highlighterOpacity = 0.4,
     this.toolType = ToolType.pen,
     this.drawingTool = DrawingTool.pen,
     this.onStrokesChanged,
@@ -63,6 +69,7 @@ class DrawingCanvas extends StatefulWidget {
     this.initialTexts,
     this.onTextsChanged,
     this.lassoColor = const Color(0xFF2196F3), // Default: Blue
+    this.laserPointerColor = Colors.red, // Default: Red
     this.onImageSelectionChanged,
     this.initialShapes,
     this.onShapesChanged,
@@ -71,6 +78,7 @@ class DrawingCanvas extends StatefulWidget {
     this.onTablesChanged,
     this.onTableSelectionChanged,
     this.onTransformChanged,
+    this.presentationHighlighterFadeEnabled = true,
   });
 
   @override
@@ -142,7 +150,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   Offset? _lastErasePoint;
 
   /// 지우개 반경 계산 (커서와 실제 지우기 반경 일치)
-  double get _eraserRadius => math.max(20.0, widget.strokeWidth * 2.5);
+  double get _eraserRadius => widget.eraserWidth / 2;
 
   // Lasso selection
   List<Offset> _lassoPath = [];
@@ -203,6 +211,20 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   String? _readyToDragTableId;
   String? _readyToDragShapeId;
 
+  // 레이저 포인터 상태
+  Offset? _laserPointerPosition;
+  List<Offset> _laserPointerTrail = [];
+  Timer? _laserPointerFadeTimer;
+  static const int _laserPointerTrailLength = 50; // 트레일 포인트 수 (더 긴 꼬리)
+  static const Duration _laserPointerFadeDuration = Duration(milliseconds: 3000); // 페이드 시간 (3초)
+
+  // 프레젠테이션 형광펜 상태
+  List<Offset> _presentationHighlighterTrail = [];
+  Timer? _presentationHighlighterFadeTimer;
+  double _presentationHighlighterOpacity = 1.0;
+  // 선긋기 중에는 트레일 길이 제한 없음 - 선긋기 완료 후에만 fade 시작
+  static const Duration _presentationHighlighterFadeDuration = Duration(milliseconds: 1500); // 1.5초 페이드
+
   // 삭제 버튼 표시 상태 (1초 롱프레스 후 표시)
   String? _showDeleteButtonForTableId;
   String? _showDeleteButtonForImageId;
@@ -223,8 +245,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   double _originalColumnWidth = 0;
   double _originalRowHeight = 0;
   Offset _resizeBorderStartPos = Offset.zero; // Position where border was touched
-  static const Duration _resizeLongPressDuration = Duration(milliseconds: 500); // 0.5 second for activation
-  static const Duration _resizeVisualFeedbackDelay = Duration(milliseconds: 300); // 0.3 second for visual
+  static const Duration _resizeLongPressDuration = Duration(milliseconds: 1000); // 1 second for activation
+  static const Duration _resizeVisualFeedbackDelay = Duration(milliseconds: 500); // 0.5 second for visual
   static const double _resizeMovementThreshold = 20.0; // 20px movement allowed before cancel
 
   @override
@@ -265,6 +287,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _resizeLongPressTimer?.cancel();
     _resizeVisualFeedbackTimer?.cancel();
     _imageDeleteLongPressTimer?.cancel();
+    _laserPointerFadeTimer?.cancel();
+    _presentationHighlighterFadeTimer?.cancel();
 
     // 이미지 캐시 정리
     for (final image in _loadedImages.values) {
@@ -614,6 +638,51 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                   scale: _scale,
                   offset: _offset,
                   lassoColor: widget.lassoColor,
+                ),
+              ),
+            ),
+          ),
+        // Laser pointer overlay
+        if (_laserPointerPosition != null || _laserPointerTrail.isNotEmpty)
+          Positioned(
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              child: CustomPaint(
+                key: ValueKey('laser_pointer_${_laserPointerTrail.length}'),
+                isComplex: true,
+                willChange: true,
+                painter: _LaserPointerPainter(
+                  position: _laserPointerPosition,
+                  trail: _laserPointerTrail,
+                  scale: _scale,
+                  offset: _offset,
+                  color: widget.laserPointerColor,
+                ),
+              ),
+            ),
+          ),
+        // Presentation highlighter overlay
+        if (_presentationHighlighterTrail.isNotEmpty)
+          Positioned(
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              child: CustomPaint(
+                key: ValueKey('presentation_highlighter_${_presentationHighlighterTrail.length}_${_presentationHighlighterOpacity.toStringAsFixed(2)}'),
+                isComplex: true,
+                willChange: true,
+                painter: _PresentationHighlighterPainter(
+                  trail: _presentationHighlighterTrail,
+                  scale: _scale,
+                  offset: _offset,
+                  color: widget.strokeColor,
+                  strokeWidth: widget.strokeWidth,
+                  opacity: _presentationHighlighterOpacity,
                 ),
               ),
             ),
@@ -1082,10 +1151,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           }
         }
       }
-      // Check tables (테두리 근처에서만 인식 - 3px로 더 좁게)
+      // Check tables (테두리 근처에서만 인식 - 2px로 더 좁게)
       if (!tappedOnElement) {
         for (final table in _tables) {
-          if (table.isNearBorder(canvasPosForElementCheck, tolerance: 3.0)) {
+          if (table.isNearBorder(canvasPosForElementCheck, tolerance: 2.0)) {
             tappedOnElement = true;
             break;
           }
@@ -1156,10 +1225,12 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Check if tapping on an image or text first (any tool)
     final canvasPosForHitTest = _screenToCanvas(event.localPosition);
 
-    // 펜/하이라이터/지우개 도구일 때는 이미지/텍스트/도형/표 위에서도 동작 가능하도록 선택 건너뛰기
+    // 펜/하이라이터/지우개/레이저포인터/도형 도구일 때는 이미지/텍스트/도형/표 위에서도 동작 가능하도록 선택 건너뛰기
     final isDrawingOrEraserTool = widget.drawingTool == DrawingTool.pen ||
                                    widget.drawingTool == DrawingTool.highlighter ||
-                                   widget.drawingTool == DrawingTool.eraser;
+                                   widget.drawingTool == DrawingTool.eraser ||
+                                   widget.drawingTool == DrawingTool.laserPointer ||
+                                   _isShapeTool(widget.drawingTool);
 
     // Check for image tap (reversed order to select topmost) - only when NOT drawing
     if (!isDrawingOrEraserTool) {
@@ -1422,7 +1493,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       }
 
       // Third check: Left edge for table drag (lower priority than cell borders)
-      if (table.isOnLeftEdge(canvasPosForHitTest, tolerance: 3.0)) {
+      if (table.isOnLeftEdge(canvasPosForHitTest, tolerance: 2.0)) {
         // Start pending state (no visual feedback yet)
         _isPendingResizeLongPress = true;
         _resizingTableId = table.id;
@@ -1467,7 +1538,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       }
 
       // Fourth check: Top edge for table height resize (resize upward)
-      if (table.isOnTopEdge(canvasPosForHitTest, tolerance: 3.0)) {
+      if (table.isOnTopEdge(canvasPosForHitTest, tolerance: 2.0)) {
         // Start pending state (no visual feedback yet)
         _isPendingResizeLongPress = true;
         _resizingTableId = table.id;
@@ -1519,10 +1590,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       debugPrint('TABLE_CHECK: tables=${_tables.length}, pos=$canvasPosForHitTest');
       for (int i = _tables.length - 1; i >= 0; i--) {
         final table = _tables[i];
-        final isNear = table.isNearBorder(canvasPosForHitTest, tolerance: 3.0);
+        final isNear = table.isNearBorder(canvasPosForHitTest, tolerance: 2.0);
         final isInside = table.containsPoint(canvasPosForHitTest);
         debugPrint('TABLE[$i]: id=${table.id}, pos=${table.position}, isNearBorder=$isNear, containsPoint=$isInside');
-        // 셀 테두리 근처에서만 인식 (tolerance: 3px로 더 좁게)
+        // 셀 테두리 근처에서만 인식 (tolerance: 2px로 더 좁게)
         if (isNear) {
           debugPrint('TABLE_PENDING: ${table.id} (1초 후 선택됨)');
           // ★ 즉시 선택하지 않고 pending 상태로만 설정
@@ -1600,6 +1671,38 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
+    // Handle laser pointer tool
+    if (widget.drawingTool == DrawingTool.laserPointer) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _log('LaserPointer DOWN at $canvasPos');
+      // 이전 페이드 타이머 취소 및 상태 완전 초기화
+      _laserPointerFadeTimer?.cancel();
+      _laserPointerFadeTimer = null;
+      setState(() {
+        _laserPointerPosition = canvasPos;
+        _laserPointerTrail = [canvasPos];
+        _lastDeviceKind = 'LaserPointer';
+      });
+      return;
+    }
+
+    // Handle presentation highlighter tool
+    if (widget.drawingTool == DrawingTool.presentationHighlighter) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _log('PresentationHighlighter DOWN at $canvasPos');
+      // 이전 페이드 타이머 취소 및 상태 초기화
+      _presentationHighlighterFadeTimer?.cancel();
+      _presentationHighlighterFadeTimer = null;
+      _activePointerId = event.pointer;
+      _isPenDrawing = true;
+      setState(() {
+        _presentationHighlighterTrail = [canvasPos];
+        _presentationHighlighterOpacity = 1.0;
+        _lastDeviceKind = 'PresentationHighlighter';
+      });
+      return;
+    }
+
     // Handle shape tools
     if (_isShapeTool(widget.drawingTool)) {
       final canvasPos = _screenToCanvas(event.localPosition);
@@ -1660,10 +1763,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
       _perfLog('PEN_CHECK_TABLES', inputType: 'tables=${_tables.length}', pos: canvasPos);
 
-      // Check if on a table border (셀 테두리 3px 이내에서만 인식)
+      // Check if on a table border (셀 테두리 2px 이내에서만 인식)
       for (int i = _tables.length - 1; i >= 0; i--) {
         final table = _tables[i];
-        final isNearBorder = table.isNearBorder(canvasPos, tolerance: 3.0);
+        final isNearBorder = table.isNearBorder(canvasPos, tolerance: 2.0);
         _perfLog('PEN_TABLE_CHECK', inputType: 'bounds=${table.bounds},isNearBorder=$isNearBorder', pos: canvasPos);
         // 셀 테두리 근처에서만 롱프레스 드래그 인식 (셀 내부에서는 그냥 필기)
         if (isNearBorder) {
@@ -1723,7 +1826,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Determine color based on tool
     Color strokeColor = widget.strokeColor;
     if (widget.drawingTool == DrawingTool.highlighter) {
-      strokeColor = widget.strokeColor.withOpacity(0.4);
+      strokeColor = widget.strokeColor.withOpacity(widget.highlighterOpacity);
     }
 
     _currentStroke = Stroke(
@@ -1766,18 +1869,19 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     return (positions[0] - positions[1]).distance;
   }
 
-  /// Erase strokes at a point
+  /// Erase strokes at a point (partial erasing - splits strokes)
   void _eraseAt(Offset point) {
     // 지우개 반경: _eraserRadius 사용 (커서와 동일)
     final eraserRadius = _eraserRadius;
     final toRemove = <Stroke>[];
+    final toAdd = <Stroke>[];
 
     for (int idx = 0; idx < _strokes.length; idx++) {
       final stroke = _strokes[idx];
-      bool shouldRemove = false;
 
-      // 도형인 경우 특별 처리
+      // 도형인 경우 전체 삭제 (부분 삭제 불가)
       if (stroke.isShape) {
+        bool shouldRemove = false;
         // 원/타원: boundingBox 기준으로 검사
         if (stroke.shapeType == ShapeType.circle) {
           // 타원의 중심과 반지름 계산
@@ -1809,33 +1913,38 @@ class DrawingCanvasState extends State<DrawingCanvas> {
             }
           }
         }
+        if (shouldRemove) {
+          toRemove.add(stroke);
+        }
       } else {
-        // 일반 스트로크: 선분 기반 검사 (포인트 사이 연결선과의 거리)
+        // 일반 스트로크: 부분 삭제 (지우개에 닿은 포인트만 제거)
         final hitDistance = eraserRadius + stroke.width / 2;
+        final erasedIndices = <int>{};
 
         // 포인트가 1개인 경우 (점)
         if (stroke.points.length == 1) {
           final p = stroke.points[0];
           final distance = (Offset(p.x, p.y) - point).distance;
           if (distance <= hitDistance) {
-            shouldRemove = true;
+            toRemove.add(stroke);
           }
         } else {
-          // 선분 기반 검사
-          for (int i = 0; i < stroke.points.length - 1; i++) {
-            final p1 = Offset(stroke.points[i].x, stroke.points[i].y);
-            final p2 = Offset(stroke.points[i + 1].x, stroke.points[i + 1].y);
-            final distance = _pointToLineDistance(point, p1, p2);
+          // 각 포인트가 지우개에 닿았는지 확인
+          for (int i = 0; i < stroke.points.length; i++) {
+            final p = stroke.points[i];
+            final distance = (Offset(p.x, p.y) - point).distance;
             if (distance <= hitDistance) {
-              shouldRemove = true;
-              break;
+              erasedIndices.add(i);
             }
           }
-        }
-      }
 
-      if (shouldRemove) {
-        toRemove.add(stroke);
+          if (erasedIndices.isNotEmpty) {
+            toRemove.add(stroke);
+            // 지워지지 않은 부분을 세그먼트로 분할
+            final segments = _splitStrokeByErasedIndices(stroke, erasedIndices);
+            toAdd.addAll(segments);
+          }
+        }
       }
     }
 
@@ -1844,6 +1953,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         for (final stroke in toRemove) {
           _strokes.remove(stroke);
         }
+        _strokes.addAll(toAdd);
       });
       widget.onStrokesChanged?.call(_strokes);
     }
@@ -1893,6 +2003,45 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     final closestY = lineStart.dy + t * dy;
 
     return (point - Offset(closestX, closestY)).distance;
+  }
+
+  /// Split a stroke into segments, excluding erased indices
+  List<Stroke> _splitStrokeByErasedIndices(Stroke stroke, Set<int> erasedIndices) {
+    final segments = <Stroke>[];
+    final currentSegment = <StrokePoint>[];
+
+    for (int i = 0; i < stroke.points.length; i++) {
+      if (erasedIndices.contains(i)) {
+        // End current segment if it has enough points
+        if (currentSegment.length >= 2) {
+          segments.add(_createSegmentStroke(stroke, List.from(currentSegment)));
+        }
+        currentSegment.clear();
+      } else {
+        currentSegment.add(stroke.points[i]);
+      }
+    }
+
+    // Add final segment if it has enough points
+    if (currentSegment.length >= 2) {
+      segments.add(_createSegmentStroke(stroke, List.from(currentSegment)));
+    }
+
+    return segments;
+  }
+
+  /// Create a new stroke from a segment of points
+  Stroke _createSegmentStroke(Stroke original, List<StrokePoint> points) {
+    return Stroke(
+      id: '${original.id}_${DateTime.now().millisecondsSinceEpoch}',
+      toolType: original.toolType,
+      color: original.color,
+      width: original.width,
+      points: points,
+      timestamp: original.timestamp,
+      isShape: original.isShape,
+      shapeType: original.shapeType,
+    );
   }
 
   void _onPointerMove(PointerMoveEvent event) {
@@ -2178,6 +2327,33 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       } else {
         _log('Lasso MOVE (early): _lassoPath is EMPTY! Cannot add points.');
       }
+      return;
+    }
+
+    // Handle laser pointer tool - process BEFORE finger gesture check
+    if (widget.drawingTool == DrawingTool.laserPointer && _laserPointerPosition != null) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      setState(() {
+        _laserPointerPosition = canvasPos;
+        _laserPointerTrail.add(canvasPos);
+        // 트레일 길이 제한
+        if (_laserPointerTrail.length > _laserPointerTrailLength) {
+          _laserPointerTrail.removeAt(0);
+        }
+      });
+      return;
+    }
+
+    // Handle presentation highlighter tool - process BEFORE finger gesture check
+    if (widget.drawingTool == DrawingTool.presentationHighlighter &&
+        _presentationHighlighterTrail.isNotEmpty &&
+        event.pointer == _activePointerId) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      setState(() {
+        _presentationHighlighterTrail.add(canvasPos);
+        // 선긋기 중에는 트레일 길이 제한 없음 - 모든 점 유지
+        // fade는 선긋기가 끝난 후에만 시작됨
+      });
       return;
     }
 
@@ -2512,6 +2688,29 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
+    // Handle laser pointer end - start fade animation
+    if (widget.drawingTool == DrawingTool.laserPointer && _laserPointerPosition != null) {
+      _activePointerId = null;  // 다음 터치를 허용하기 위해 초기화
+      _isPenDrawing = false;
+      _startLaserPointerFade();
+      return;
+    }
+
+    // Handle presentation highlighter end - start fade animation or clear immediately
+    if (widget.drawingTool == DrawingTool.presentationHighlighter && _presentationHighlighterTrail.isNotEmpty) {
+      _activePointerId = null;  // 다음 터치를 허용하기 위해 초기화
+      _isPenDrawing = false;
+      if (widget.presentationHighlighterFadeEnabled) {
+        _startPresentationHighlighterFade();
+      } else {
+        // 페이드 OFF면 바로 트레일 삭제
+        setState(() {
+          _presentationHighlighterTrail.clear();
+        });
+      }
+      return;
+    }
+
     // Handle shape tool end
     if (_isShapeTool(widget.drawingTool) && _isDrawingShape) {
       _activePointerId = null;
@@ -2684,6 +2883,79 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       tilt: event.tilt,
       timestamp: DateTime.now().millisecondsSinceEpoch,
     );
+  }
+
+  /// Start laser pointer fade animation
+  void _startLaserPointerFade() {
+    _laserPointerFadeTimer?.cancel();
+    _laserPointerFadeTimer = null;
+
+    // 점진적으로 트레일을 제거하여 페이드 효과 구현
+    int fadeSteps = 15; // 15단계로 페이드
+    int stepDuration = _laserPointerFadeDuration.inMilliseconds ~/ fadeSteps;
+    int currentStep = 0;
+
+    _laserPointerFadeTimer = Timer.periodic(Duration(milliseconds: stepDuration), (timer) {
+      currentStep++;
+      if (!mounted) {
+        timer.cancel();
+        _laserPointerFadeTimer = null;
+        return;
+      }
+
+      setState(() {
+        // 트레일에서 점진적으로 포인트 제거
+        if (_laserPointerTrail.length > 2) {
+          _laserPointerTrail.removeAt(0);
+          _laserPointerTrail.removeAt(0);
+        } else if (_laserPointerTrail.isNotEmpty) {
+          _laserPointerTrail.clear();
+        }
+
+        // 완전히 사라지면 포지션도 null로
+        if (_laserPointerTrail.isEmpty || currentStep >= fadeSteps) {
+          _laserPointerPosition = null;
+          _laserPointerTrail.clear();
+          timer.cancel();
+          _laserPointerFadeTimer = null;
+        }
+      });
+    });
+  }
+
+  /// Start presentation highlighter fade animation - removes from beginning (first drawn)
+  void _startPresentationHighlighterFade() {
+    _presentationHighlighterFadeTimer?.cancel();
+    _presentationHighlighterFadeTimer = null;
+
+    if (_presentationHighlighterTrail.isEmpty) return;
+
+    // 처음 그어진 부분부터 점차 지우기
+    final totalPoints = _presentationHighlighterTrail.length;
+    int pointsToRemovePerStep = (totalPoints / 30).ceil().clamp(1, 10); // 30단계로 나눠서 제거
+    int stepDuration = _presentationHighlighterFadeDuration.inMilliseconds ~/ 30;
+
+    _presentationHighlighterFadeTimer = Timer.periodic(Duration(milliseconds: stepDuration), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        _presentationHighlighterFadeTimer = null;
+        return;
+      }
+
+      setState(() {
+        // 앞쪽(처음 그어진 부분)에서 포인트 제거
+        for (int i = 0; i < pointsToRemovePerStep && _presentationHighlighterTrail.isNotEmpty; i++) {
+          _presentationHighlighterTrail.removeAt(0);
+        }
+
+        // 모두 제거되면 타이머 종료
+        if (_presentationHighlighterTrail.isEmpty) {
+          _presentationHighlighterOpacity = 1.0;
+          timer.cancel();
+          _presentationHighlighterFadeTimer = null;
+        }
+      });
+    });
   }
 
   /// Check if a drawing tool is a shape tool
@@ -3575,6 +3847,168 @@ class _LassoOverlayPainter extends CustomPainter {
   }
 }
 
+/// Laser pointer overlay painter - draws laser pointer with fading trail
+class _LaserPointerPainter extends CustomPainter {
+  final Offset? position;
+  final List<Offset> trail;
+  final double scale;
+  final Offset offset;
+  final Color color;
+
+  _LaserPointerPainter({
+    required this.position,
+    required this.trail,
+    required this.scale,
+    required this.offset,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (trail.isEmpty && position == null) return;
+
+    // Convert canvas coordinates to screen coordinates
+    final screenTrail = trail.map((p) {
+      return Offset(
+        p.dx * scale + offset.dx,
+        p.dy * scale + offset.dy,
+      );
+    }).toList();
+
+    // Draw fading trail
+    if (screenTrail.length >= 2) {
+      for (int i = 1; i < screenTrail.length; i++) {
+        // Calculate opacity based on position in trail (older = more transparent)
+        final progress = i / screenTrail.length;
+        final opacity = progress * 0.8; // Max opacity 0.8
+
+        final trailPaint = Paint()
+          ..color = color.withOpacity(opacity)
+          ..strokeWidth = 4.0 * progress + 2.0 // Thicker toward current position
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
+
+        canvas.drawLine(screenTrail[i - 1], screenTrail[i], trailPaint);
+      }
+    }
+
+    // Draw current position (large red dot with glow effect)
+    if (position != null) {
+      final screenPos = Offset(
+        position!.dx * scale + offset.dx,
+        position!.dy * scale + offset.dy,
+      );
+
+      // Outer glow
+      final glowPaint = Paint()
+        ..color = color.withOpacity(0.3)
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(screenPos, 20.0, glowPaint);
+
+      // Middle glow
+      final midGlowPaint = Paint()
+        ..color = color.withOpacity(0.5)
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(screenPos, 12.0, midGlowPaint);
+
+      // Inner bright dot
+      final dotPaint = Paint()
+        ..color = color
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(screenPos, 6.0, dotPaint);
+
+      // White center highlight
+      final highlightPaint = Paint()
+        ..color = Colors.white.withOpacity(0.8)
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(screenPos, 2.0, highlightPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_LaserPointerPainter oldDelegate) {
+    return position != oldDelegate.position ||
+        trail.length != oldDelegate.trail.length ||
+        scale != oldDelegate.scale ||
+        offset != oldDelegate.offset ||
+        color != oldDelegate.color;
+  }
+}
+
+/// Presentation highlighter overlay painter - draws highlighter with fading effect
+class _PresentationHighlighterPainter extends CustomPainter {
+  final List<Offset> trail;
+  final double scale;
+  final Offset offset;
+  final Color color;
+  final double strokeWidth;
+  final double opacity;
+
+  _PresentationHighlighterPainter({
+    required this.trail,
+    required this.scale,
+    required this.offset,
+    required this.color,
+    required this.strokeWidth,
+    required this.opacity,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (trail.isEmpty) return;
+
+    // Convert canvas coordinates to screen coordinates
+    final screenTrail = trail.map((p) {
+      return Offset(
+        p.dx * scale + offset.dx,
+        p.dy * scale + offset.dy,
+      );
+    }).toList();
+
+    // Draw highlighter path with semi-transparency
+    if (screenTrail.length >= 2) {
+      final path = ui.Path();
+      path.moveTo(screenTrail.first.dx, screenTrail.first.dy);
+
+      for (int i = 1; i < screenTrail.length; i++) {
+        path.lineTo(screenTrail[i].dx, screenTrail[i].dy);
+      }
+
+      // Main highlighter stroke with current opacity
+      final highlighterPaint = Paint()
+        ..color = color.withOpacity(0.5 * opacity)
+        ..strokeWidth = strokeWidth * scale
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+
+      canvas.drawPath(path, highlighterPaint);
+
+      // Add a subtle glow effect
+      final glowPaint = Paint()
+        ..color = color.withOpacity(0.2 * opacity)
+        ..strokeWidth = (strokeWidth + 8) * scale
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4.0);
+
+      canvas.drawPath(path, glowPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PresentationHighlighterPainter oldDelegate) {
+    return trail.length != oldDelegate.trail.length ||
+        scale != oldDelegate.scale ||
+        offset != oldDelegate.offset ||
+        color != oldDelegate.color ||
+        strokeWidth != oldDelegate.strokeWidth ||
+        opacity != oldDelegate.opacity;
+  }
+}
+
 /// Template background painter - supports multiple page templates
 class _TemplatePainter extends CustomPainter {
   final PageTemplate template;
@@ -4166,6 +4600,9 @@ class _ShapePainter extends CustomPainter {
           break;
         case CanvasShapeType.arrow:
           _drawArrow(canvas, shape.startPoint, shape.endPoint, paint);
+          break;
+        case CanvasShapeType.pdfBackground:
+          // PDF 배경은 별도 렌더링 (이미지로 처리)
           break;
       }
 

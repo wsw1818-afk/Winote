@@ -1,29 +1,25 @@
 import 'package:flutter/material.dart';
 
-/// Drawing toolbar widget with color picker, stroke width, and global actions
-/// (도구 선택은 QuickToolbar에서 담당)
+/// Drawing toolbar widget with undo/redo, color picker, and clear button
+/// (도구 선택 및 펜 굵기는 QuickToolbar에서 담당)
 class DrawingToolbar extends StatelessWidget {
   final Color currentColor;
-  final double currentWidth;
   final bool canUndo;
   final bool canRedo;
   final VoidCallback? onUndo;
   final VoidCallback? onRedo;
   final VoidCallback? onClear;
   final ValueChanged<Color> onColorChanged;
-  final ValueChanged<double> onWidthChanged;
 
   const DrawingToolbar({
     super.key,
     required this.currentColor,
-    required this.currentWidth,
     this.canUndo = false,
     this.canRedo = false,
     this.onUndo,
     this.onRedo,
     this.onClear,
     required this.onColorChanged,
-    required this.onWidthChanged,
   });
 
   @override
@@ -47,12 +43,12 @@ class DrawingToolbar extends StatelessWidget {
             _buildIconButton(
               icon: Icons.undo,
               onPressed: canUndo ? onUndo : null,
-              tooltip: 'Undo',
+              tooltip: '실행 취소',
             ),
             _buildIconButton(
               icon: Icons.redo,
               onPressed: canRedo ? onRedo : null,
-              tooltip: 'Redo',
+              tooltip: '다시 실행',
             ),
             const SizedBox(width: 8),
             Container(width: 1, height: 24, color: Colors.grey[300]),
@@ -60,19 +56,14 @@ class DrawingToolbar extends StatelessWidget {
 
             // Color picker
             _buildColorButton(context),
-            const SizedBox(width: 8),
 
-            // Width slider
-            Expanded(
-              child: _buildWidthSlider(),
-            ),
-            const SizedBox(width: 8),
+            const Spacer(),
 
             // Clear button
             _buildIconButton(
               icon: Icons.delete_outline,
               onPressed: onClear,
-              tooltip: 'Clear All',
+              tooltip: '전체 지우기',
               color: Colors.red[400],
             ),
           ],
@@ -101,7 +92,7 @@ class DrawingToolbar extends StatelessWidget {
 
   Widget _buildColorButton(BuildContext context) {
     return Tooltip(
-      message: 'Color',
+      message: '색상',
       child: GestureDetector(
         onTap: () => _showColorPicker(context),
         child: Container(
@@ -117,40 +108,6 @@ class DrawingToolbar extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildWidthSlider() {
-    return Row(
-      children: [
-        Icon(Icons.line_weight, size: 16, color: Colors.grey[600]),
-        const SizedBox(width: 4),
-        Expanded(
-          child: SliderTheme(
-            data: SliderThemeData(
-              trackHeight: 4,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-              activeTrackColor: Colors.blue[400],
-              inactiveTrackColor: Colors.grey[300],
-              thumbColor: Colors.blue[600],
-            ),
-            child: Slider(
-              value: currentWidth,
-              min: 0.5,
-              max: 30.0,
-              onChanged: onWidthChanged,
-            ),
-          ),
-        ),
-        SizedBox(
-          width: 32,
-          child: Text(
-            currentWidth.toStringAsFixed(1),
-            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
-          ),
-        ),
-      ],
     );
   }
 
@@ -213,7 +170,7 @@ class ColorPickerSheet extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Select Color',
+            '색상 선택',
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 16),

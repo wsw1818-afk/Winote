@@ -113,6 +113,14 @@ class SettingsService {
     await _save();
   }
 
+  // Default Eraser Width
+  double get defaultEraserWidth => (_settings['defaultEraserWidth'] as num?)?.toDouble() ?? 20.0;
+
+  Future<void> setDefaultEraserWidth(double width) async {
+    _settings['defaultEraserWidth'] = width;
+    await _save();
+  }
+
   // Default Template
   PageTemplate get defaultTemplate {
     final index = _settings['defaultTemplate'] as int? ?? PageTemplate.grid.index;
@@ -169,6 +177,14 @@ class SettingsService {
 
   Future<void> setThemeModeIndex(int index) async {
     _settings['themeMode'] = index;
+    await _save();
+  }
+
+  // Debug Overlay
+  bool get showDebugOverlay => _settings['showDebugOverlay'] as bool? ?? false;
+
+  Future<void> setShowDebugOverlay(bool show) async {
+    _settings['showDebugOverlay'] = show;
     await _save();
   }
 }

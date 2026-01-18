@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import '../../../domain/entities/stroke.dart';
 import '../../../domain/entities/stroke_point.dart';
 import '../../../domain/entities/canvas_shape.dart';
@@ -52,6 +53,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   DrawingTool _currentTool = DrawingTool.pen;
   Color _currentColor = Colors.black;
   double _currentWidth = 2.0;
+  double _eraserWidth = 20.0;
+  double _highlighterOpacity = 0.4; // 형광펜 투명도
   PageTemplate _currentTemplate = PageTemplate.grid;
 
   // Stroke smoothing
@@ -59,6 +62,12 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   // Lasso color (from settings)
   Color _lassoColor = const Color(0xFF2196F3);
+
+  // Laser pointer color
+  Color _laserPointerColor = Colors.red;
+
+  // Presentation highlighter fade mode
+  bool _presentationHighlighterFadeEnabled = true;
 
   // Track undo/redo state
   bool _canUndo = false;
@@ -71,6 +80,23 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   // Image editing state
   bool _showImageEditToolbar = false;
+
+  // Debug overlay (from settings)
+  bool _showDebugOverlay = false;
+
+  /// 현재 페이지의 PDF 배경 정보 가져오기
+  CanvasShape? _getCurrentPagePdfBackground() {
+    if (_currentNote == null) return null;
+    if (_currentPageIndex >= _currentNote!.pages.length) return null;
+
+    final shapes = _currentNote!.pages[_currentPageIndex].shapes;
+    for (final shape in shapes) {
+      if (shape.type == CanvasShapeType.pdfBackground && shape.pdfPath != null) {
+        return shape;
+      }
+    }
+    return null;
+  }
 
   @override
   void initState() {
@@ -90,8 +116,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     _autoSaveEnabled = settings.autoSaveEnabled;
     _autoSaveDelay = settings.autoSaveDelay;
     _currentWidth = settings.defaultPenWidth;
+    _eraserWidth = settings.defaultEraserWidth;
     _currentTemplate = settings.defaultTemplate;
     _lassoColor = settings.lassoColor;
+    _showDebugOverlay = settings.showDebugOverlay;
   }
 
   void _scheduleAutoSave() {
@@ -115,14 +143,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
     if (mounted) {
       setState(() => _hasChanges = false);
-      // Show brief auto-save indicator
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('자동 저장됨'),
-          duration: Duration(seconds: 1),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
     }
   }
 
@@ -166,12 +186,26 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     if (_currentNote == null) return;
 
     final strokes = _canvasKey.currentState?.strokes ?? [];
-    final shapes = _canvasKey.currentState?.shapes ?? [];
+    final canvasShapes = _canvasKey.currentState?.shapes ?? [];
     // Use page number from pages array, not index
     if (_currentPageIndex < _currentNote!.pages.length) {
       final pageNumber = _currentNote!.pages[_currentPageIndex].pageNumber;
       _currentNote = _currentNote!.updatePageStrokes(pageNumber, strokes);
-      _currentNote = _currentNote!.updatePageShapes(pageNumber, shapes);
+
+      // PDF 배경 shape를 보존하면서 캔버스 shapes 업데이트
+      // 기존 페이지의 PDF 배경 shape 찾기
+      final existingShapes = _currentNote!.pages[_currentPageIndex].shapes;
+      final pdfBackgrounds = existingShapes
+          .where((s) => s.type == CanvasShapeType.pdfBackground)
+          .toList();
+
+      // PDF 배경이 아닌 캔버스 shapes + 기존 PDF 배경 병합
+      final nonPdfShapes = canvasShapes
+          .where((s) => s.type != CanvasShapeType.pdfBackground)
+          .toList();
+      final mergedShapes = [...pdfBackgrounds, ...nonPdfShapes];
+
+      _currentNote = _currentNote!.updatePageShapes(pageNumber, mergedShapes);
     }
   }
 
@@ -228,10 +262,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       ),
       body: Column(
         children: [
-          // Toolbar (전역 설정: 실행취소/다시실행, 색상, 굵기, 전체삭제)
+          // Toolbar (전역 설정: 실행취소/다시실행, 색상, 전체삭제)
           DrawingToolbar(
             currentColor: _currentColor,
-            currentWidth: _currentWidth,
             canUndo: _canUndo,
             canRedo: _canRedo,
             onUndo: () {
@@ -246,26 +279,33 @@ class _EditorPageState extends ConsumerState<EditorPage> {
             onColorChanged: (color) {
               setState(() => _currentColor = color);
             },
-            onWidthChanged: (width) {
-              setState(() => _currentWidth = width);
-            },
           ),
           // Canvas - A4 비율로 화면 가득 채움
           Expanded(
             child: Stack(
               children: [
+                // PDF 배경 (있는 경우)
+                if (_getCurrentPagePdfBackground() != null)
+                  Positioned.fill(
+                    child: _buildPdfBackground(),
+                  ),
                 // 용지 - 화면 전체를 A4 비율로 채움
                 Positioned.fill(
                   child: Container(
-                    color: Colors.white,
+                    color: _getCurrentPagePdfBackground() == null ? Colors.white : Colors.transparent,
                     child: DrawingCanvas(
                             key: _canvasKey,
                             strokeColor: _currentColor,
                             strokeWidth: _currentWidth,
+                            eraserWidth: _eraserWidth,
+                            highlighterOpacity: _highlighterOpacity,
                             toolType: _toolTypeFromDrawingTool(_currentTool),
                             drawingTool: _currentTool,
                             pageTemplate: _currentTemplate,
                             lassoColor: _currentColor,
+                            laserPointerColor: _laserPointerColor,
+                            presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
+                            showDebugOverlay: _showDebugOverlay,
                             initialShapes: _currentNote?.getShapesForPage(_currentPageIndex),
                             onStrokesChanged: (strokes) {
                               _updateUndoRedoState();
@@ -299,10 +339,11 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         currentTool: _currentTool,
                         currentColor: _currentColor,
                         currentWidth: _currentWidth,
+                        eraserWidth: _eraserWidth,
+                        highlighterOpacity: _highlighterOpacity,
                         currentTemplate: _currentTemplate,
                         hasSelection: _canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false,
                         onToolChanged: (tool) {
-                          print('[EDITOR] Tool changed to: $tool'); // 디버그 로그
                           setState(() => _currentTool = tool);
                           // Clear selection when switching away from lasso
                           if (tool != DrawingTool.lasso) {
@@ -314,6 +355,13 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         },
                         onWidthChanged: (width) {
                           setState(() => _currentWidth = width);
+                        },
+                        onEraserWidthChanged: (width) {
+                          setState(() => _eraserWidth = width);
+                          SettingsService.instance.setDefaultEraserWidth(width);
+                        },
+                        onHighlighterOpacityChanged: (opacity) {
+                          setState(() => _highlighterOpacity = opacity);
                         },
                         onTemplateChanged: (template) {
                           setState(() => _currentTemplate = template);
@@ -335,6 +383,14 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         onInsertImage: _insertImage,
                         onInsertText: _insertTextBox,
                         onInsertTable: _showInsertTableDialog,
+                        laserPointerColor: _laserPointerColor,
+                        onLaserPointerColorChanged: (color) {
+                          setState(() => _laserPointerColor = color);
+                        },
+                        presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
+                        onPresentationHighlighterFadeChanged: (enabled) {
+                          setState(() => _presentationHighlighterFadeEnabled = enabled);
+                        },
                       ),
                     ),
                   ),
@@ -387,57 +443,80 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         border: Border(top: BorderSide(color: Colors.grey[300]!)),
       ),
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Previous page button
-          IconButton(
-            icon: const Icon(Icons.chevron_left),
-            onPressed: _currentPageIndex > 0 ? _goToPreviousPage : null,
-            tooltip: '이전 페이지',
-          ),
+          // 가운데 정렬된 페이지 네비게이션 그룹
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.grey[300]!),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Previous page button
+                IconButton(
+                  icon: const Icon(Icons.chevron_left),
+                  onPressed: _currentPageIndex > 0 ? _goToPreviousPage : null,
+                  tooltip: '이전 페이지',
+                  iconSize: 24,
+                  padding: const EdgeInsets.all(8),
+                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                ),
 
-          // Page indicator and list
-          Expanded(
-            child: Center(
-              child: GestureDetector(
-                onTap: _showPageListDialog,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.grey[300]!),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '${_currentPageIndex + 1} / $pageCount',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
+                // Page indicator
+                GestureDetector(
+                  onTap: _showPageListDialog,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '${_currentPageIndex + 1} / $pageCount',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      const Icon(Icons.expand_more, size: 20),
-                    ],
+                        const SizedBox(width: 4),
+                        const Icon(Icons.expand_more, size: 18),
+                      ],
+                    ),
                   ),
                 ),
-              ),
+
+                // Next page button
+                IconButton(
+                  icon: const Icon(Icons.chevron_right),
+                  onPressed: _currentPageIndex < pageCount - 1 ? _goToNextPage : null,
+                  tooltip: '다음 페이지',
+                  iconSize: 24,
+                  padding: const EdgeInsets.all(8),
+                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                ),
+              ],
             ),
           ),
 
-          // Next page button
-          IconButton(
-            icon: const Icon(Icons.chevron_right),
-            onPressed: _currentPageIndex < pageCount - 1 ? _goToNextPage : null,
-            tooltip: '다음 페이지',
-          ),
+          const SizedBox(width: 16),
 
-          // Add page button
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: _addNewPage,
-            tooltip: '페이지 추가',
+          // Add page button (분리)
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.grey[300]!),
+            ),
+            child: IconButton(
+              icon: const Icon(Icons.add),
+              onPressed: _addNewPage,
+              tooltip: '페이지 추가',
+              iconSize: 24,
+              padding: const EdgeInsets.all(8),
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            ),
           ),
         ],
       ),
@@ -479,10 +558,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
     setState(() {});
     _loadCurrentPageStrokes();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('페이지 ${_currentPageIndex + 1} 추가됨')),
-    );
   }
 
   void _showPageListDialog() {
@@ -491,39 +566,46 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('페이지 선택'),
+        title: Row(
+          children: [
+            const Text('페이지 선택'),
+            const Spacer(),
+            Text(
+              '$pageCount페이지',
+              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+            ),
+          ],
+        ),
         content: SizedBox(
-          width: 300,
-          height: 400,
-          child: ListView.builder(
+          width: 400,
+          height: 500,
+          child: GridView.builder(
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+              childAspectRatio: 0.75, // A4 비율에 가깝게
+            ),
             itemCount: pageCount,
             itemBuilder: (context, index) {
               final page = _currentNote!.pages[index];
               final isCurrentPage = index == _currentPageIndex;
               final strokeCount = page.strokes.length;
 
-              return ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: isCurrentPage ? Colors.blue : Colors.grey[300],
-                  foregroundColor: isCurrentPage ? Colors.white : Colors.black,
-                  child: Text('${index + 1}'),
-                ),
-                title: Text('페이지 ${index + 1}'),
-                subtitle: Text('$strokeCount개 스트로크'),
-                selected: isCurrentPage,
+              return _buildPageThumbnail(
+                page: page,
+                pageIndex: index,
+                isCurrentPage: isCurrentPage,
+                strokeCount: strokeCount,
+                canDelete: pageCount > 1,
                 onTap: () {
                   Navigator.pop(context);
                   _goToPage(index);
                 },
-                trailing: pageCount > 1
-                    ? IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 20),
-                        onPressed: () {
-                          Navigator.pop(context);
-                          _showDeletePageDialog(index);
-                        },
-                      )
-                    : null,
+                onDelete: () {
+                  Navigator.pop(context);
+                  _showDeletePageDialog(index);
+                },
               );
             },
           ),
@@ -533,14 +615,146 @@ class _EditorPageState extends ConsumerState<EditorPage> {
             onPressed: () => Navigator.pop(context),
             child: const Text('닫기'),
           ),
-          TextButton(
+          TextButton.icon(
             onPressed: () {
               Navigator.pop(context);
               _addNewPage();
             },
-            child: const Text('페이지 추가'),
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('페이지 추가'),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 페이지 썸네일 위젯 빌드
+  Widget _buildPageThumbnail({
+    required NotePage page,
+    required int pageIndex,
+    required bool isCurrentPage,
+    required int strokeCount,
+    required bool canDelete,
+    required VoidCallback onTap,
+    required VoidCallback onDelete,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isCurrentPage ? Colors.blue : Colors.grey[300]!,
+            width: isCurrentPage ? 2 : 1,
+          ),
+          boxShadow: isCurrentPage
+              ? [
+                  BoxShadow(
+                    color: Colors.blue.withOpacity(0.2),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
+        ),
+        child: Stack(
+          children: [
+            // 썸네일 미리보기
+            Positioned.fill(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(7),
+                child: page.strokes.isEmpty
+                    ? Center(
+                        child: Icon(
+                          Icons.draw_outlined,
+                          size: 32,
+                          color: Colors.grey[300],
+                        ),
+                      )
+                    : CustomPaint(
+                        painter: _PageThumbnailPainter(strokes: page.strokes),
+                      ),
+              ),
+            ),
+            // 페이지 번호 배지
+            Positioned(
+              left: 4,
+              top: 4,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isCurrentPage ? Colors.blue : Colors.grey[700],
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  '${pageIndex + 1}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+            // 삭제 버튼
+            if (canDelete)
+              Positioned(
+                right: 2,
+                top: 2,
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: onDelete,
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withOpacity(0.9),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.close,
+                        size: 14,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            // 스트로크 수 표시 (하단)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.transparent,
+                      Colors.black.withOpacity(0.5),
+                    ],
+                  ),
+                  borderRadius: const BorderRadius.only(
+                    bottomLeft: Radius.circular(7),
+                    bottomRight: Radius.circular(7),
+                  ),
+                ),
+                child: Text(
+                  strokeCount > 0 ? '$strokeCount개' : '빈 페이지',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -584,10 +798,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
     setState(() {});
     _loadCurrentPageStrokes();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('페이지가 삭제되었습니다')),
-    );
   }
 
   ToolType _toolTypeFromDrawingTool(DrawingTool tool) {
@@ -599,7 +809,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       case DrawingTool.eraser:
         return ToolType.eraser;
       case DrawingTool.lasso:
-        return ToolType.pen; // Lasso doesn't draw strokes
+      case DrawingTool.laserPointer:
+      case DrawingTool.presentationHighlighter:
+        return ToolType.pen; // Lasso/Laser/PresentationHighlighter don't draw strokes
       case DrawingTool.shapeLine:
       case DrawingTool.shapeRectangle:
       case DrawingTool.shapeCircle:
@@ -627,13 +839,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     await _storageService.saveNote(_currentNote!);
 
     setState(() => _hasChanges = false);
-
-    if (mounted) {
-      final totalStrokes = _currentNote!.strokes.length;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('저장됨: ${_currentNote!.pageCount}페이지, $totalStrokes개의 스트로크')),
-      );
-    }
   }
 
   /// 즐겨찾기 토글
@@ -649,15 +854,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
     // 저장소에도 저장
     await _storageService.saveNote(_currentNote!);
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_currentNote!.isFavorite ? '즐겨찾기에 추가됨' : '즐겨찾기에서 제거됨'),
-          duration: const Duration(seconds: 1),
-        ),
-      );
-    }
   }
 
   void _onBackPressed() {
@@ -1101,18 +1297,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       await _canvasKey.currentState?.addImage(savedPath);
 
       setState(() => _hasChanges = true);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('이미지가 삽입되었습니다')),
-        );
-      }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('이미지 삽입 실패: $e')),
-        );
-      }
+      debugPrint('이미지 삽입 실패: $e');
     }
   }
 
@@ -1194,10 +1380,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                   setState(() => _smoothingLevel = value);
                   StrokeSmoothingService.instance.level = value;
                   Navigator.pop(context);
-
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('필기 보정: ${_getSmoothingLevelText(value)}')),
-                  );
                 }
               },
             )),
@@ -1270,11 +1452,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
     final allStrokes = _currentNote?.strokes ?? [];
     if (allStrokes.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('내보낼 필기가 없습니다')),
-        );
-      }
       return;
     }
 
@@ -1373,21 +1550,12 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           );
         }
       } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('이미지 내보내기 실패')),
-          );
-        }
+        debugPrint('이미지 내보내기 실패');
       }
     } catch (e) {
       // Close loading dialog on error
       if (mounted) Navigator.pop(context);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('오류: $e')),
-        );
-      }
+      debugPrint('이미지 내보내기 오류: $e');
     }
   }
 
@@ -1551,10 +1719,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
     setState(() => _hasChanges = true);
     _updateUndoRedoState();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${rows}x$columns 표가 삽입되었습니다 (드래그하여 이동 가능)')),
-    );
   }
 
   Future<void> _exportToPdf() async {
@@ -1570,11 +1734,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     }
 
     if (currentStrokes.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('내보낼 필기가 없습니다')),
-        );
-      }
       return;
     }
 
@@ -1663,22 +1822,54 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           );
         }
       } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('PDF 생성 실패')),
-          );
-        }
+        debugPrint('PDF 생성 실패');
       }
     } catch (e) {
       // Close loading dialog if still open
       if (mounted) Navigator.pop(context);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('PDF 생성 오류: $e')),
-        );
-      }
+      debugPrint('PDF 생성 오류: $e');
     }
+  }
+
+  /// PDF 배경 위젯 빌드
+  Widget _buildPdfBackground() {
+    final pdfShape = _getCurrentPagePdfBackground();
+    if (pdfShape == null || pdfShape.pdfPath == null) {
+      return const SizedBox.shrink();
+    }
+
+    final pdfFile = File(pdfShape.pdfPath!);
+    if (!pdfFile.existsSync()) {
+      debugPrint('[EditorPage] PDF 파일을 찾을 수 없습니다: ${pdfShape.pdfPath}');
+      return const SizedBox.shrink();
+    }
+
+    final targetPdfPage = pdfShape.pdfPageIndex ?? 0;
+
+    debugPrint('[EditorPage] PDF 배경 빌드: 노트페이지=$_currentPageIndex, PDF페이지=${targetPdfPage + 1}');
+
+    // 페이지마다 고유한 Key를 사용하여 PDF 뷰어를 완전히 새로 생성
+    // Key에 targetPdfPage를 포함하여 PDF 페이지가 바뀔 때마다 위젯 재생성
+    return IgnorePointer(
+      // PDF 뷰어 터치 이벤트 비활성화 (캔버스 위에서 그리기 가능하게)
+      ignoring: true,
+      child: SfPdfViewer.file(
+        pdfFile,
+        key: ValueKey('pdf_viewer_page_$targetPdfPage'),
+        initialPageNumber: targetPdfPage + 1, // PDF 페이지는 1부터 시작
+        canShowScrollHead: false,
+        canShowScrollStatus: false,
+        canShowPaginationDialog: false,
+        enableDoubleTapZooming: false,
+        enableTextSelection: false,
+        pageLayoutMode: PdfPageLayoutMode.single,
+        scrollDirection: PdfScrollDirection.horizontal,
+        interactionMode: PdfInteractionMode.pan,
+        onDocumentLoaded: (details) {
+          debugPrint('[EditorPage] PDF 로드 완료: 총 ${details.document.pages.count}페이지, 현재 표시: ${targetPdfPage + 1}');
+        },
+      ),
+    );
   }
 
   /// 노트 공유 (.wnote 파일로 공유)
@@ -1710,20 +1901,100 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       // 로딩 닫기
       if (mounted) Navigator.pop(context);
 
-      if (!success && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('공유에 실패했습니다')),
-        );
+      if (!success) {
+        debugPrint('공유에 실패했습니다');
       }
     } catch (e) {
       // 로딩 닫기
       if (mounted) Navigator.pop(context);
+      debugPrint('공유 오류: $e');
+    }
+  }
+}
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('공유 오류: $e')),
-        );
+/// 페이지 썸네일을 그리는 CustomPainter
+class _PageThumbnailPainter extends CustomPainter {
+  final List<Stroke> strokes;
+
+  _PageThumbnailPainter({required this.strokes});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (strokes.isEmpty) return;
+
+    // 모든 스트로크의 바운딩 박스 계산
+    double minX = double.infinity;
+    double minY = double.infinity;
+    double maxX = double.negativeInfinity;
+    double maxY = double.negativeInfinity;
+
+    for (final stroke in strokes) {
+      for (final point in stroke.points) {
+        if (point.x < minX) minX = point.x;
+        if (point.y < minY) minY = point.y;
+        if (point.x > maxX) maxX = point.x;
+        if (point.y > maxY) maxY = point.y;
       }
     }
+
+    // 패딩 추가
+    const padding = 10.0;
+    minX -= padding;
+    minY -= padding;
+    maxX += padding;
+    maxY += padding;
+
+    // 썸네일에 맞게 스케일 계산
+    final contentWidth = maxX - minX;
+    final contentHeight = maxY - minY;
+
+    if (contentWidth <= 0 || contentHeight <= 0) return;
+
+    final scaleX = size.width / contentWidth;
+    final scaleY = size.height / contentHeight;
+    final scale = scaleX < scaleY ? scaleX : scaleY;
+
+    // 콘텐츠 중앙 정렬
+    final offsetX = (size.width - contentWidth * scale) / 2 - minX * scale;
+    final offsetY = (size.height - contentHeight * scale) / 2 - minY * scale;
+
+    // 각 스트로크 그리기
+    for (final stroke in strokes) {
+      if (stroke.points.isEmpty) continue;
+
+      final paint = Paint()
+        ..color = stroke.color
+        ..strokeWidth = (stroke.width * scale).clamp(0.5, 3.0)
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke;
+
+      if (stroke.points.length == 1) {
+        // 단일 포인트 - 원으로 그리기
+        final p = stroke.points.first;
+        canvas.drawCircle(
+          Offset(p.x * scale + offsetX, p.y * scale + offsetY),
+          paint.strokeWidth / 2,
+          paint,
+        );
+      } else {
+        // 여러 포인트 - 경로로 그리기
+        final path = Path();
+        final first = stroke.points.first;
+        path.moveTo(first.x * scale + offsetX, first.y * scale + offsetY);
+
+        for (int i = 1; i < stroke.points.length; i++) {
+          final p = stroke.points[i];
+          path.lineTo(p.x * scale + offsetX, p.y * scale + offsetY);
+        }
+
+        canvas.drawPath(path, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PageThumbnailPainter oldDelegate) {
+    return strokes.length != oldDelegate.strokes.length;
   }
 }

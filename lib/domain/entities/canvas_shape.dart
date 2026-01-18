@@ -6,6 +6,7 @@ enum CanvasShapeType {
   rectangle,
   circle,
   arrow,
+  pdfBackground, // PDF 페이지 배경
 }
 
 /// Shape element that can be placed and edited on the canvas
@@ -19,6 +20,10 @@ class CanvasShape {
   final bool isFilled;
   final int timestamp;
 
+  // PDF 배경용 추가 필드
+  final String? pdfPath;
+  final int? pdfPageIndex;
+
   CanvasShape({
     required this.id,
     required this.type,
@@ -28,7 +33,32 @@ class CanvasShape {
     this.strokeWidth = 2.0,
     this.isFilled = false,
     required this.timestamp,
+    this.pdfPath,
+    this.pdfPageIndex,
   });
+
+  /// PDF 배경 생성 팩토리
+  factory CanvasShape.pdfBackground({
+    required String id,
+    required String pdfPath,
+    required int pdfPageIndex,
+    required Offset position,
+    required double width,
+    required double height,
+  }) {
+    return CanvasShape(
+      id: id,
+      type: CanvasShapeType.pdfBackground,
+      startPoint: position,
+      endPoint: Offset(position.dx + width, position.dy + height),
+      color: const Color(0x00000000), // 투명
+      strokeWidth: 0,
+      isFilled: false,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      pdfPath: pdfPath,
+      pdfPageIndex: pdfPageIndex,
+    );
+  }
 
   CanvasShape copyWith({
     String? id,
@@ -39,6 +69,8 @@ class CanvasShape {
     double? strokeWidth,
     bool? isFilled,
     int? timestamp,
+    String? pdfPath,
+    int? pdfPageIndex,
   }) {
     return CanvasShape(
       id: id ?? this.id,
@@ -49,6 +81,8 @@ class CanvasShape {
       strokeWidth: strokeWidth ?? this.strokeWidth,
       isFilled: isFilled ?? this.isFilled,
       timestamp: timestamp ?? this.timestamp,
+      pdfPath: pdfPath ?? this.pdfPath,
+      pdfPageIndex: pdfPageIndex ?? this.pdfPageIndex,
     );
   }
 
@@ -91,6 +125,9 @@ class CanvasShape {
         } else {
           return (distance - radius).abs() <= tolerance;
         }
+      case CanvasShapeType.pdfBackground:
+        // PDF 배경은 선택 불가
+        return false;
     }
   }
 
@@ -126,7 +163,7 @@ class CanvasShape {
   }
 
   Map<String, dynamic> toJson() {
-    return {
+    final map = {
       'id': id,
       'type': type.index,
       'startX': startPoint.dx,
@@ -138,6 +175,9 @@ class CanvasShape {
       'isFilled': isFilled,
       'timestamp': timestamp,
     };
+    if (pdfPath != null) map['pdfPath'] = pdfPath!;
+    if (pdfPageIndex != null) map['pdfPageIndex'] = pdfPageIndex!;
+    return map;
   }
 
   factory CanvasShape.fromJson(Map<String, dynamic> json) {
@@ -153,6 +193,8 @@ class CanvasShape {
         (json['endY'] as num).toDouble(),
       ),
       color: Color(json['color'] as int),
+      pdfPath: json['pdfPath'] as String?,
+      pdfPageIndex: json['pdfPageIndex'] as int?,
       strokeWidth: (json['strokeWidth'] as num?)?.toDouble() ?? 2.0,
       isFilled: json['isFilled'] as bool? ?? false,
       timestamp: json['timestamp'] as int,

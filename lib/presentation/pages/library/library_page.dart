@@ -145,7 +145,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
                 Icons.label,
                 color: _selectedTag != null ? Colors.blue : null,
               ),
-              tooltip: '태그 필터',
+              tooltip: '태그 필터', // 커스텀 툴팁 (기본 "Show menu" 대신)
               onSelected: (tag) {
                 setState(() {
                   _selectedTag = tag;

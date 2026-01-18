@@ -71,13 +71,11 @@ class WindowsPointerService {
 
     if (!Platform.isWindows) {
       _available = false;
-      print('[WindowsPointerService] Not Windows platform');
       return;
     }
 
     _channel.setMethodCallHandler(_handleMethodCall);
     _available = true;
-    print('[WindowsPointerService] MethodChannel initialized');
   }
 
   /// Handle method calls from native C++
@@ -104,8 +102,7 @@ class WindowsPointerService {
         _recentPointers.removeAt(0);
       }
 
-      print('[WindowsPointerService] Received: pointer=$pointerId, '
-          'type=${info.type.name}, pressure=$pressure');
+      // 디버그 로깅 제거 (성능 최적화)
     }
     return null;
   }

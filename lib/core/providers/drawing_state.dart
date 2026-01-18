@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../domain/entities/stroke.dart';
+import '../../domain/entities/stroke_point.dart';
 import '../services/stroke_smoothing_service.dart';
 
 /// Tool types available in the drawing canvas
@@ -8,6 +9,8 @@ enum DrawingTool {
   highlighter,
   eraser,
   lasso, // 올가미 선택 도구
+  laserPointer, // 레이저 포인터 (발표용)
+  presentationHighlighter, // 프레젠테이션 형광펜 (줄 긋고 사라짐)
   shapeLine, // 직선
   shapeRectangle, // 사각형
   shapeCircle, // 원/타원
@@ -44,6 +47,10 @@ class DrawingState extends ChangeNotifier {
   // Eraser settings
   double _eraserWidth = 20.0;
   double get eraserWidth => _eraserWidth;
+
+  // Laser pointer settings
+  Color _laserPointerColor = Colors.red;
+  Color get laserPointerColor => _laserPointerColor;
 
   // Stroke smoothing (필기 보정)
   SmoothingLevel _smoothingLevel = SmoothingLevel.medium;
@@ -138,6 +145,12 @@ class DrawingState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Set laser pointer color
+  void setLaserPointerColor(Color color) {
+    _laserPointerColor = color;
+    notifyListeners();
+  }
+
   /// Set stroke smoothing level (필기 보정 강도)
   void setSmoothingLevel(SmoothingLevel level) {
     _smoothingLevel = level;
@@ -158,7 +171,9 @@ class DrawingState extends ChangeNotifier {
         return _highlighterColor;
       case DrawingTool.eraser:
       case DrawingTool.lasso:
-        return Colors.white; // Not used for eraser/lasso
+      case DrawingTool.laserPointer:
+      case DrawingTool.presentationHighlighter:
+        return Colors.white; // Not used for eraser/lasso/laser/presentationHighlighter
     }
   }
 
@@ -175,7 +190,9 @@ class DrawingState extends ChangeNotifier {
         return _highlighterWidth;
       case DrawingTool.eraser:
       case DrawingTool.lasso:
-        return _eraserWidth; // Lasso uses eraser width for visual
+      case DrawingTool.laserPointer:
+      case DrawingTool.presentationHighlighter:
+        return _eraserWidth; // Lasso/laser/presentationHighlighter uses eraser width for visual
     }
   }
 
@@ -228,18 +245,30 @@ class DrawingState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Erase strokes at a point
+  /// Erase strokes at a point (partial erasing - splits strokes)
   void eraseAt(Offset point, double radius) {
     final toRemove = <Stroke>[];
+    final toAdd = <Stroke>[];
 
     for (final stroke in _strokes) {
-      for (final p in stroke.points) {
+      // Find points that should be erased
+      final erasedIndices = <int>{};
+      for (int i = 0; i < stroke.points.length; i++) {
+        final p = stroke.points[i];
         final distance = (Offset(p.x, p.y) - point).distance;
         if (distance <= radius + stroke.width / 2) {
-          toRemove.add(stroke);
-          break;
+          erasedIndices.add(i);
         }
       }
+
+      if (erasedIndices.isEmpty) continue;
+
+      // Mark stroke for removal
+      toRemove.add(stroke);
+
+      // Split stroke into segments (keeping non-erased parts)
+      final segments = _splitStrokeByErasedIndices(stroke, erasedIndices);
+      toAdd.addAll(segments);
     }
 
     if (toRemove.isNotEmpty) {
@@ -247,8 +276,48 @@ class DrawingState extends ChangeNotifier {
       for (final stroke in toRemove) {
         _strokes.remove(stroke);
       }
+      _strokes.addAll(toAdd);
       notifyListeners();
     }
+  }
+
+  /// Split a stroke into segments, excluding erased indices
+  List<Stroke> _splitStrokeByErasedIndices(Stroke stroke, Set<int> erasedIndices) {
+    final segments = <Stroke>[];
+    final currentSegment = <StrokePoint>[];
+
+    for (int i = 0; i < stroke.points.length; i++) {
+      if (erasedIndices.contains(i)) {
+        // End current segment if it has enough points
+        if (currentSegment.length >= 2) {
+          segments.add(_createSegmentStroke(stroke, currentSegment));
+        }
+        currentSegment.clear();
+      } else {
+        currentSegment.add(stroke.points[i]);
+      }
+    }
+
+    // Add final segment if it has enough points
+    if (currentSegment.length >= 2) {
+      segments.add(_createSegmentStroke(stroke, currentSegment));
+    }
+
+    return segments;
+  }
+
+  /// Create a new stroke from a segment of points
+  Stroke _createSegmentStroke(Stroke original, List<StrokePoint> points) {
+    return Stroke(
+      id: '${original.id}_${DateTime.now().millisecondsSinceEpoch}',
+      toolType: original.toolType,
+      color: original.color,
+      width: original.width,
+      points: List.from(points),
+      timestamp: original.timestamp,
+      isShape: original.isShape,
+      shapeType: original.shapeType,
+    );
   }
 
   /// Update canvas transform

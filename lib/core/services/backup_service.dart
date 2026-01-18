@@ -247,24 +247,23 @@ class BackupService {
         return null;
       }
 
-      // Let user choose save location
-      final result = await FilePicker.platform.saveFile(
-        dialogTitle: '백업 파일 저장',
-        fileName: backupPath.split(Platform.pathSeparator).last,
-        type: FileType.custom,
-        allowedExtensions: ['wbk'],
+      // Let user choose directory (more reliable on Windows than saveFile)
+      final selectedDirectory = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '백업 파일 저장 위치 선택',
       );
 
-      if (result == null) {
+      if (selectedDirectory == null) {
         return null; // User cancelled
       }
 
-      // Copy backup file to selected location
+      // Copy backup file to selected directory
       final sourceFile = File(backupPath);
-      await sourceFile.copy(result);
+      final fileName = backupPath.split(Platform.pathSeparator).last;
+      final destPath = '$selectedDirectory${Platform.pathSeparator}$fileName';
+      await sourceFile.copy(destPath);
 
-      debugPrint('[BackupService] Exported backup to: $result');
-      return result;
+      debugPrint('[BackupService] Exported backup to: $destPath');
+      return destPath;
     } catch (e) {
       debugPrint('[BackupService] Export error: $e');
       return null;
@@ -364,23 +363,21 @@ class BackupService {
       final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
       final fileName = '${cleanTitle}_$timestamp.wnote';
 
-      // Let user choose save location
-      final result = await FilePicker.platform.saveFile(
-        dialogTitle: '노트 내보내기',
-        fileName: fileName,
-        type: FileType.custom,
-        allowedExtensions: ['wnote'],
+      // Let user choose directory (more reliable on Windows than saveFile)
+      final selectedDirectory = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '노트 내보내기 위치 선택',
       );
 
-      if (result == null) {
+      if (selectedDirectory == null) {
         return null;
       }
 
-      final file = File(result);
+      final destPath = '$selectedDirectory${Platform.pathSeparator}$fileName';
+      final file = File(destPath);
       await file.writeAsBytes(gzipBytes);
 
-      debugPrint('[BackupService] Exported note to: $result');
-      return result;
+      debugPrint('[BackupService] Exported note to: $destPath');
+      return destPath;
     } catch (e) {
       debugPrint('[BackupService] Export note error: $e');
       return null;

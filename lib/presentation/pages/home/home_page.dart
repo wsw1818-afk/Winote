@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/note_storage_service.dart';
+import '../../../core/services/pdf_import_service.dart';
 import '../../../domain/entities/stroke.dart';
 
 class HomePage extends ConsumerStatefulWidget {
@@ -61,13 +62,29 @@ class _HomePageState extends ConsumerState<HomePage> {
               onRefresh: _loadData,
               child: _buildContent(),
             ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          await context.push('/editor/new');
-          _loadData(); // 새 노트 생성 후 목록 새로고침
-        },
-        icon: const Icon(Icons.add),
-        label: const Text('새 노트'),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          // PDF 가져오기 버튼
+          FloatingActionButton.small(
+            heroTag: 'importPdf',
+            onPressed: _importPdf,
+            tooltip: 'PDF 가져오기',
+            child: const Icon(Icons.picture_as_pdf),
+          ),
+          const SizedBox(height: 12),
+          // 새 노트 버튼
+          FloatingActionButton.extended(
+            heroTag: 'newNote',
+            onPressed: () async {
+              await context.push('/editor/new');
+              _loadData();
+            },
+            icon: const Icon(Icons.add),
+            label: const Text('새 노트'),
+          ),
+        ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: 0,
@@ -291,68 +308,157 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget _buildRecentNoteItem(Note note) {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        leading: Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            color: Colors.grey[100],
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: note.strokes.isEmpty
-              ? Icon(Icons.draw_outlined, color: Colors.grey[400])
-              : ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: CustomPaint(
-                    painter: _NoteThumbnailPainter(
-                      strokes: note.pages.isNotEmpty
-                          ? note.pages.first.strokes
-                          : note.strokes,
-                    ),
-                  ),
-                ),
-        ),
-        title: Row(
-          children: [
-            if (note.isFavorite)
-              const Padding(
-                padding: EdgeInsets.only(right: 4),
-                child: Icon(Icons.star, size: 16, color: Colors.amber),
-              ),
-            Expanded(
-              child: Text(
-                note.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (note.pages.length > 1)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.blue.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  '${note.pages.length}p',
-                  style: TextStyle(
-                    fontSize: 10,
-                    color: Colors.blue[700],
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-          ],
-        ),
-        subtitle: Text(
-          _formatDate(note.modifiedAt),
-          style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-        ),
-        trailing: const Icon(Icons.chevron_right),
+      child: InkWell(
         onTap: () async {
           await context.push('/editor/${note.id}');
           _loadData();
         },
+        onLongPress: () => _showDeleteNoteDialog(note),
+        borderRadius: BorderRadius.circular(12),
+        child: ListTile(
+          leading: Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: Colors.grey[100],
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: note.strokes.isEmpty
+                ? Icon(Icons.draw_outlined, color: Colors.grey[400])
+                : ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: CustomPaint(
+                      painter: _NoteThumbnailPainter(
+                        strokes: note.pages.isNotEmpty
+                            ? note.pages.first.strokes
+                            : note.strokes,
+                      ),
+                    ),
+                  ),
+          ),
+          title: Row(
+            children: [
+              if (note.isFavorite)
+                const Padding(
+                  padding: EdgeInsets.only(right: 4),
+                  child: Icon(Icons.star, size: 16, color: Colors.amber),
+                ),
+              Expanded(
+                child: Text(
+                  note.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (note.pages.length > 1)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${note.pages.length}p',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.blue[700],
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          subtitle: Text(
+            _formatDate(note.modifiedAt),
+            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+          ),
+          trailing: const Icon(Icons.chevron_right),
+        ),
+      ),
+    );
+  }
+
+  /// PDF 파일 가져오기
+  Future<void> _importPdf() async {
+    try {
+      // PDF 파일 선택
+      final pdfPath = await PdfImportService.instance.pickPdfFile();
+      if (pdfPath == null) return;
+
+      // 로딩 표시
+      if (mounted) {
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => const AlertDialog(
+            content: Row(
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(width: 16),
+                Text('PDF 가져오는 중...'),
+              ],
+            ),
+          ),
+        );
+      }
+
+      // PDF를 노트로 변환
+      final note = await PdfImportService.instance.importPdfWithMultiplePages(
+        pdfPath: pdfPath,
+      );
+
+      // 로딩 닫기
+      if (mounted) Navigator.pop(context);
+
+      if (note != null) {
+        // 노트 저장
+        await _storageService.saveNote(note);
+
+        // 에디터로 이동
+        if (mounted) {
+          await context.push('/editor/${note.id}');
+          _loadData();
+        }
+      } else {
+        // 오류 메시지
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('PDF 가져오기에 실패했습니다')),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('PDF 가져오기 오류: $e');
+      if (mounted) {
+        Navigator.pop(context); // 로딩 닫기
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('오류: $e')),
+        );
+      }
+    }
+  }
+
+  void _showDeleteNoteDialog(Note note) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('노트 삭제'),
+        content: Text('"${note.title}" 노트를 삭제하시겠습니까?\n\n삭제된 노트는 복구할 수 없습니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await _storageService.deleteNote(note.id);
+              _loadData();
+            },
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('삭제'),
+          ),
+        ],
       ),
     );
   }

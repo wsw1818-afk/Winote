@@ -176,9 +176,9 @@ class CanvasTable {
 
   /// Check if a point is on the left edge of the table (for drag detection)
   /// Returns true if point is within tolerance of the left border
-  bool isOnLeftEdge(Offset point, {double tolerance = 3.0}) {
-    // Check if Y is within table height (strict 3px margin)
-    if (point.dy < position.dy - 3 || point.dy > position.dy + height + 3) {
+  bool isOnLeftEdge(Offset point, {double tolerance = 1.5}) {
+    // Check if Y is within table height (strict 1.5px margin)
+    if (point.dy < position.dy - 1.5 || point.dy > position.dy + height + 1.5) {
       return false;
     }
     // Check if X is near the left edge (strict tolerance)
@@ -187,9 +187,9 @@ class CanvasTable {
 
   /// Check if a point is on the top edge of the table (for height resize)
   /// Returns true if point is within tolerance of the top border
-  bool isOnTopEdge(Offset point, {double tolerance = 3.0}) {
-    // Check if X is within table width (strict 3px margin)
-    if (point.dx < position.dx - 3 || point.dx > position.dx + width + 3) {
+  bool isOnTopEdge(Offset point, {double tolerance = 1.5}) {
+    // Check if X is within table width (strict 1.5px margin)
+    if (point.dx < position.dx - 1.5 || point.dx > position.dx + width + 1.5) {
       return false;
     }
     // Check if Y is near the top edge (strict tolerance)
@@ -198,7 +198,7 @@ class CanvasTable {
 
   /// Check if a point is near a column border (for resize detection)
   /// Returns column index (right border of that column) or -1 if not near any border
-  int getColumnBorderAt(Offset point, {double tolerance = 5.0}) {
+  int getColumnBorderAt(Offset point, {double tolerance = 1.5}) {
     if (point.dy < position.dy || point.dy > position.dy + height) return -1;
 
     double x = position.dx;
@@ -213,7 +213,7 @@ class CanvasTable {
 
   /// Check if a point is near a row border (for resize detection)
   /// Returns row index (bottom border of that row) or -1 if not near any border
-  int getRowBorderAt(Offset point, {double tolerance = 5.0}) {
+  int getRowBorderAt(Offset point, {double tolerance = 1.5}) {
     if (point.dx < position.dx || point.dx > position.dx + width) return -1;
 
     double y = position.dy;

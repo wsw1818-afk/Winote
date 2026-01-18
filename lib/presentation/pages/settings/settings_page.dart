@@ -1,11 +1,14 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:file_picker/file_picker.dart';
 import '../../../core/services/note_storage_service.dart';
 import '../../../core/services/pdf_export_service.dart';
 import '../../../core/services/backup_service.dart';
 import '../../../core/services/settings_service.dart';
+import '../../../core/services/cloud_sync_service.dart';
 import '../../../core/providers/theme_provider.dart';
 import '../../../core/providers/drawing_state.dart';
 
@@ -26,10 +29,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _showDebugOverlay = false;
   String _defaultTemplate = '빈 페이지';
 
+  // Cloud sync settings
+  final CloudSyncService _cloudSync = CloudSyncService.instance;
+  bool _isSyncing = false;
+
   @override
   void initState() {
     super.initState();
     _loadSettings();
+    _initCloudSync();
+  }
+
+  Future<void> _initCloudSync() async {
+    await _cloudSync.initialize();
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadSettings() async {
@@ -40,6 +53,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _autoSaveEnabled = settings.autoSaveEnabled;
       _autoSaveDelay = settings.autoSaveDelay;
       _defaultTemplate = _templateToString(settings.defaultTemplate);
+      _showDebugOverlay = settings.showDebugOverlay;
     });
   }
 
@@ -173,6 +187,53 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
           const Divider(),
 
+          // Cloud Sync Section
+          _buildSectionHeader('클라우드 동기화'),
+          ListTile(
+            leading: Icon(
+              _cloudSync.isEnabled ? Icons.cloud_done : Icons.cloud_off,
+              color: _cloudSync.isEnabled ? Colors.green : Colors.grey,
+            ),
+            title: const Text('동기화 상태'),
+            subtitle: Text(_cloudSync.isEnabled
+                ? '${_cloudSync.provider == CloudProvider.oneDrive ? 'OneDrive' : '로컬 폴더'}와 동기화 중\n${_cloudSync.getStatusText()}'
+                : '동기화 비활성화'),
+            trailing: _isSyncing
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(_cloudSync.isEnabled ? Icons.sync : Icons.chevron_right),
+            onTap: _cloudSync.isEnabled ? _syncNow : null,
+          ),
+          ListTile(
+            leading: const Icon(Icons.cloud_upload),
+            title: const Text('OneDrive 연결'),
+            subtitle: Text(_cloudSync.provider == CloudProvider.oneDrive
+                ? _cloudSync.syncPath ?? '설정됨'
+                : '클릭하여 설정'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _setupOneDrive,
+          ),
+          ListTile(
+            leading: const Icon(Icons.folder_special),
+            title: const Text('로컬 폴더 동기화'),
+            subtitle: Text(_cloudSync.provider == CloudProvider.local
+                ? _cloudSync.syncPath ?? '설정됨'
+                : '클릭하여 설정'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _setupLocalSync,
+          ),
+          if (_cloudSync.isEnabled)
+            ListTile(
+              leading: const Icon(Icons.cloud_off, color: Colors.red),
+              title: const Text('동기화 해제', style: TextStyle(color: Colors.red)),
+              onTap: _disableSync,
+            ),
+
+          const Divider(),
+
           // Storage Section
           _buildSectionHeader('저장소'),
           ListTile(
@@ -235,13 +296,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             onTap: _importBackupFromExternal,
           ),
           ListTile(
-            leading: const Icon(Icons.share),
-            title: const Text('백업 공유'),
-            subtitle: const Text('다른 앱으로 백업 공유'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: _shareBackup,
-          ),
-          ListTile(
             leading: const Icon(Icons.note_add),
             title: const Text('노트 가져오기'),
             subtitle: const Text('.wnote 파일 가져오기'),
@@ -256,10 +310,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           SwitchListTile(
             secondary: const Icon(Icons.bug_report),
             title: const Text('디버그 오버레이 표시'),
-            subtitle: const Text('필기 입력 정보 표시'),
+            subtitle: const Text('필기 입력 정보 표시 (개발자용)'),
             value: _showDebugOverlay,
-            onChanged: (value) {
+            onChanged: (value) async {
               setState(() => _showDebugOverlay = value);
+              await SettingsService.instance.setShowDebugOverlay(value);
             },
           ),
 
@@ -597,23 +652,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (mounted) Navigator.pop(context);
 
     if (filePath != null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('백업 완료: ${filePath.split('/').last}'),
-            action: SnackBarAction(
-              label: '폴더 열기',
-              onPressed: _openBackupFolder,
-            ),
-          ),
-        );
-      }
+      debugPrint('백업 완료: ${filePath.split('/').last}');
     } else {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('백업할 데이터가 없거나 백업에 실패했습니다')),
-        );
-      }
+      debugPrint('백업할 데이터가 없거나 백업에 실패했습니다');
     }
   }
 
@@ -624,9 +665,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (!mounted) return;
 
     if (backups.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('저장된 백업이 없습니다')),
-      );
       return;
     }
 
@@ -674,6 +712,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       '${backupService.formatFileSize(backup.fileSize)}',
                     ),
                     trailing: PopupMenuButton<String>(
+                      tooltip: '', // 기본 "Show menu" 툴팁 비활성화
                       onSelected: (action) async {
                         if (action == 'restore') {
                           Navigator.pop(context);
@@ -780,11 +819,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (mounted) Navigator.pop(context);
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result.message)),
-      );
-    }
+    debugPrint('복원 결과: ${result.message}');
   }
 
   Future<void> _deleteBackup(BackupInfo backup) async {
@@ -813,12 +848,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (mounted) {
       Navigator.pop(context); // Close bottom sheet
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(deleted ? '백업이 삭제되었습니다' : '백업 삭제 실패'),
-        ),
-      );
     }
+    debugPrint(deleted ? '백업이 삭제되었습니다' : '백업 삭제 실패');
   }
 
   void _showAboutDialog() {
@@ -886,11 +917,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       await storageService.deleteNote(note.id);
     }
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${notes.length}개의 노트가 삭제되었습니다')),
-      );
-    }
+    debugPrint('${notes.length}개의 노트가 삭제되었습니다');
   }
 
   Future<void> _exportBackupToExternal() async {
@@ -914,16 +941,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (mounted) Navigator.pop(context);
 
-    if (mounted) {
-      if (result != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('백업 내보내기 완료: ${result.split('\\').last}')),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('백업 내보내기가 취소되었거나 실패했습니다')),
-        );
-      }
+    if (result != null) {
+      debugPrint('백업 내보내기 완료: ${result.split('\\').last}');
+    } else {
+      debugPrint('백업 내보내기가 취소되었거나 실패했습니다');
     }
   }
 
@@ -931,11 +952,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final backupService = BackupService.instance;
     final result = await backupService.importBackupFromExternal();
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result.message)),
-      );
-    }
+    debugPrint('가져오기 결과: ${result.message}');
   }
 
   Future<void> _shareBackup() async {
@@ -959,10 +976,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (mounted) Navigator.pop(context);
 
-    if (mounted && !success) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('공유할 데이터가 없거나 공유에 실패했습니다')),
-      );
+    if (!success) {
+      debugPrint('공유할 데이터가 없거나 공유에 실패했습니다');
     }
   }
 
@@ -970,14 +985,164 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final backupService = BackupService.instance;
     final note = await backupService.importNote();
 
+    if (note != null) {
+      debugPrint('노트 가져오기 완료: ${note.title}');
+    } else {
+      debugPrint('노트 가져오기가 취소되었거나 실패했습니다');
+    }
+  }
+
+  // ===== Cloud Sync Methods =====
+
+  Future<void> _syncNow() async {
+    if (_isSyncing) return;
+
+    setState(() => _isSyncing = true);
+
+    final result = await _cloudSync.syncAll();
+
     if (mounted) {
-      if (note != null) {
+      setState(() => _isSyncing = false);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.message),
+          backgroundColor: result.success ? Colors.green : Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _setupOneDrive() async {
+    // OneDrive 경로 자동 감지
+    final oneDrivePath = await _cloudSync.detectOneDrivePath();
+
+    if (oneDrivePath != null) {
+      // 자동 감지 또는 직접 선택 옵션 제공
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('OneDrive 연결'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('OneDrive 폴더를 찾았습니다:'),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  oneDrivePath,
+                  style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text('어떻게 하시겠습니까?'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'cancel'),
+              child: const Text('취소'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'select'),
+              child: const Text('직접 선택'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'auto'),
+              child: const Text('이 폴더 사용'),
+            ),
+          ],
+        ),
+      );
+
+      if (choice == 'auto') {
+        final success = await _cloudSync.setSyncFolder(oneDrivePath, CloudProvider.oneDrive);
+        if (mounted) {
+          setState(() {});
+          if (success) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('OneDrive 연결 완료')),
+            );
+          }
+        }
+      } else if (choice == 'select') {
+        await _selectSyncFolder(CloudProvider.oneDrive);
+      }
+    } else {
+      // OneDrive를 찾지 못한 경우 수동 선택
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('노트 가져오기 완료: ${note.title}')),
+          const SnackBar(
+            content: Text('OneDrive 폴더를 찾을 수 없습니다. 수동으로 선택해주세요.'),
+            duration: Duration(seconds: 3),
+          ),
         );
-      } else {
+        await _selectSyncFolder(CloudProvider.oneDrive);
+      }
+    }
+  }
+
+  Future<void> _setupLocalSync() async {
+    await _selectSyncFolder(CloudProvider.local);
+  }
+
+  Future<void> _selectSyncFolder(CloudProvider provider) async {
+    final result = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: provider == CloudProvider.oneDrive
+          ? 'OneDrive 폴더 선택'
+          : '동기화 폴더 선택',
+    );
+
+    if (result != null) {
+      final success = await _cloudSync.setSyncFolder(result, provider);
+      if (mounted) {
+        setState(() {});
+        if (success) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${provider == CloudProvider.oneDrive ? 'OneDrive' : '로컬 폴더'} 동기화 설정 완료',
+              ),
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _disableSync() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('동기화 해제'),
+        content: const Text(
+          '동기화를 해제하시겠습니까?\n\n로컬 노트는 유지되지만, 클라우드와 더 이상 동기화되지 않습니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('해제', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      await _cloudSync.disableSync();
+      if (mounted) {
+        setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('노트 가져오기가 취소되었거나 실패했습니다')),
+          const SnackBar(content: Text('동기화가 해제되었습니다')),
         );
       }
     }
