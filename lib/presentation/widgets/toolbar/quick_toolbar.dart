@@ -559,174 +559,200 @@ class _QuickToolbarState extends State<QuickToolbar> {
     final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final buttonPosition = button.localToGlobal(Offset.zero, ancestor: overlay);
 
+    // 패널 내에서 선택했는지 추적하는 플래그
+    bool colorSelectedInPanel = false;
+    bool widthSelectedInPanel = false;
+
     showDialog(
       context: context,
       barrierColor: Colors.transparent,
-      builder: (context) => Stack(
-        children: [
-          // 배경 터치시 닫기
-          Positioned.fill(
-            child: GestureDetector(
-              onTap: () => Navigator.pop(context),
-              child: Container(color: Colors.transparent),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => Stack(
+          children: [
+            // 배경 터치시 닫기 (선택이 완료된 경우에만)
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () {
+                  // 패널 내에서 색상과 굵기 모두 선택했으면 닫기
+                  if (colorSelectedInPanel && widthSelectedInPanel) {
+                    Navigator.pop(context);
+                  }
+                },
+                child: Container(color: Colors.transparent),
+              ),
             ),
-          ),
-          // 패널
-          Positioned(
-            left: buttonPosition.dx - 50,
-            top: buttonPosition.dy - 90,
-            child: Material(
-              elevation: 8,
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 색상 섹션 (2줄 레이아웃)
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '색상',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey[600],
+            // 패널
+            Positioned(
+              left: buttonPosition.dx - 50,
+              top: buttonPosition.dy - 90,
+              child: Material(
+                elevation: 8,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 색상 섹션 (2줄 레이아웃)
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '색상',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey[600],
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 6),
-                        // 1열 (7개)
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: _defaultColors.take(7).map((color) {
-                            final isColorSelected = widget.currentColor.value == color.value;
-                            return GestureDetector(
-                              onTap: () {
-                                widget.onColorChanged(color);
-                                Navigator.pop(context);
-                              },
-                              child: Container(
-                                width: 26,
-                                height: 26,
-                                margin: const EdgeInsets.all(1.5),
-                                decoration: BoxDecoration(
-                                  color: color,
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: isColorSelected ? Colors.blue : (color == Colors.white ? Colors.grey[400]! : Colors.grey[300]!),
-                                    width: isColorSelected ? 2.5 : 1,
-                                  ),
-                                ),
-                                child: isColorSelected
-                                    ? Icon(Icons.check, size: 14, color: color.computeLuminance() > 0.5 ? Colors.black : Colors.white)
-                                    : null,
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                        // 2열 (7개)
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: _defaultColors.skip(7).map((color) {
-                            final isColorSelected = widget.currentColor.value == color.value;
-                            return GestureDetector(
-                              onTap: () {
-                                widget.onColorChanged(color);
-                                Navigator.pop(context);
-                              },
-                              child: Container(
-                                width: 26,
-                                height: 26,
-                                margin: const EdgeInsets.all(1.5),
-                                decoration: BoxDecoration(
-                                  color: color,
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: isColorSelected ? Colors.blue : (color == Colors.white ? Colors.grey[400]! : Colors.grey[300]!),
-                                    width: isColorSelected ? 2.5 : 1,
-                                  ),
-                                ),
-                                child: isColorSelected
-                                    ? Icon(Icons.check, size: 14, color: color.computeLuminance() > 0.5 ? Colors.black : Colors.white)
-                                    : null,
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
-                    // 구분선
-                    Container(
-                      width: 1,
-                      height: 70,
-                      margin: const EdgeInsets.symmetric(horizontal: 10),
-                      color: Colors.grey[300],
-                    ),
-                    // 굵기 섹션
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '굵기',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: QuickToolbar.penWidthPresets.take(6).map((width) {
-                            final isWidthSelected = (widget.currentWidth - width).abs() < 0.1;
-                            return Tooltip(
-                              message: _formatWidth(width),
-                              child: GestureDetector(
+                          const SizedBox(height: 6),
+                          // 1열 (7개)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: _defaultColors.take(7).map((color) {
+                              final isThisColorSelected = widget.currentColor.value == color.value;
+                              return GestureDetector(
                                 onTap: () {
-                                  widget.onWidthChanged(width);
-                                  Navigator.pop(context);
+                                  widget.onColorChanged(color);
+                                  colorSelectedInPanel = true;
+                                  setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                  // 모두 선택되면 닫기
+                                  if (widthSelectedInPanel) {
+                                    Navigator.pop(context);
+                                  }
                                 },
                                 child: Container(
-                                  width: 28,
-                                  height: 28,
-                                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                                  width: 26,
+                                  height: 26,
+                                  margin: const EdgeInsets.all(1.5),
                                   decoration: BoxDecoration(
-                                    color: isWidthSelected ? Colors.blue.withOpacity(0.1) : null,
+                                    color: color,
                                     borderRadius: BorderRadius.circular(6),
                                     border: Border.all(
-                                      color: isWidthSelected ? Colors.blue : Colors.grey[300]!,
-                                      width: isWidthSelected ? 2 : 1,
+                                      color: isThisColorSelected ? Colors.blue : (color == Colors.white ? Colors.grey[400]! : Colors.grey[300]!),
+                                      width: isThisColorSelected ? 2.5 : 1,
                                     ),
                                   ),
-                                  child: Center(
-                                    child: Text(
-                                      width == width.toInt().toDouble() ? '${width.toInt()}' : '$width',
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        fontWeight: isWidthSelected ? FontWeight.bold : FontWeight.normal,
-                                        color: isWidthSelected ? Colors.blue : Colors.grey[600],
+                                  child: isThisColorSelected
+                                      ? Icon(Icons.check, size: 14, color: color.computeLuminance() > 0.5 ? Colors.black : Colors.white)
+                                      : null,
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                          // 2열 (7개)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: _defaultColors.skip(7).map((color) {
+                              final isThisColorSelected = widget.currentColor.value == color.value;
+                              return GestureDetector(
+                                onTap: () {
+                                  widget.onColorChanged(color);
+                                  colorSelectedInPanel = true;
+                                  setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                  // 모두 선택되면 닫기
+                                  if (widthSelectedInPanel) {
+                                    Navigator.pop(context);
+                                  }
+                                },
+                                child: Container(
+                                  width: 26,
+                                  height: 26,
+                                  margin: const EdgeInsets.all(1.5),
+                                  decoration: BoxDecoration(
+                                    color: color,
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(
+                                      color: isThisColorSelected ? Colors.blue : (color == Colors.white ? Colors.grey[400]! : Colors.grey[300]!),
+                                      width: isThisColorSelected ? 2.5 : 1,
+                                    ),
+                                  ),
+                                  child: isThisColorSelected
+                                      ? Icon(Icons.check, size: 14, color: color.computeLuminance() > 0.5 ? Colors.black : Colors.white)
+                                      : null,
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
+                      // 구분선
+                      Container(
+                        width: 1,
+                        height: 70,
+                        margin: const EdgeInsets.symmetric(horizontal: 10),
+                        color: Colors.grey[300],
+                      ),
+                      // 굵기 섹션
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '굵기',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: QuickToolbar.penWidthPresets.take(6).map((width) {
+                              final isThisWidthSelected = (widget.currentWidth - width).abs() < 0.1;
+                              return Tooltip(
+                                message: _formatWidth(width),
+                                child: GestureDetector(
+                                  onTap: () {
+                                    widget.onWidthChanged(width);
+                                    widthSelectedInPanel = true;
+                                    setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                    // 모두 선택되면 닫기
+                                    if (colorSelectedInPanel) {
+                                      Navigator.pop(context);
+                                    }
+                                  },
+                                  child: Container(
+                                    width: 28,
+                                    height: 28,
+                                    margin: const EdgeInsets.symmetric(horizontal: 2),
+                                    decoration: BoxDecoration(
+                                      color: isThisWidthSelected ? Colors.blue.withOpacity(0.1) : null,
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(
+                                        color: isThisWidthSelected ? Colors.blue : Colors.grey[300]!,
+                                        width: isThisWidthSelected ? 2 : 1,
+                                      ),
+                                    ),
+                                    child: Center(
+                                      child: Text(
+                                        width == width.toInt().toDouble() ? '${width.toInt()}' : '$width',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: isThisWidthSelected ? FontWeight.bold : FontWeight.normal,
+                                          color: isThisWidthSelected ? Colors.blue : Colors.grey[800],
+                                        ),
                                       ),
                                     ),
                                   ),
                                 ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
-                  ],
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -795,235 +821,269 @@ class _QuickToolbarState extends State<QuickToolbar> {
     final RenderBox button = context.findRenderObject() as RenderBox;
     final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final buttonPosition = button.localToGlobal(Offset.zero, ancestor: overlay);
-    final currentHighlighterColor = widget.currentColor.withOpacity(1.0);
+
+    // 패널 내에서 선택했는지 추적하는 플래그
+    bool colorSelectedInPanel = false;
+    bool widthSelectedInPanel = false;
+    bool opacitySelectedInPanel = false;
 
     showDialog(
       context: context,
       barrierColor: Colors.transparent,
-      builder: (context) => Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              onTap: () => Navigator.pop(context),
-              child: Container(color: Colors.transparent),
-            ),
-          ),
-          Positioned(
-            left: buttonPosition.dx - 100,
-            top: buttonPosition.dy - 110,
-            child: Material(
-              elevation: 8,
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 색상 섹션 (2줄 레이아웃)
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '색상',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        // 1열 (5개)
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: QuickToolbar.highlighterColors.take(5).map((color) {
-                            final isColorSelected = currentHighlighterColor.value == color.value;
-                            return GestureDetector(
-                              onTap: () {
-                                widget.onColorChanged(color);
-                                Navigator.pop(context);
-                              },
-                              child: Container(
-                                width: 26,
-                                height: 26,
-                                margin: const EdgeInsets.all(1.5),
-                                decoration: BoxDecoration(
-                                  color: color.withOpacity(0.7),
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: isColorSelected ? Colors.amber[700]! : Colors.grey[300]!,
-                                    width: isColorSelected ? 2.5 : 1,
-                                  ),
-                                ),
-                                child: isColorSelected
-                                    ? Icon(Icons.check, size: 14, color: Colors.amber[900])
-                                    : null,
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                        // 2열 (5개)
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: QuickToolbar.highlighterColors.skip(5).map((color) {
-                            final isColorSelected = currentHighlighterColor.value == color.value;
-                            return GestureDetector(
-                              onTap: () {
-                                widget.onColorChanged(color);
-                                Navigator.pop(context);
-                              },
-                              child: Container(
-                                width: 26,
-                                height: 26,
-                                margin: const EdgeInsets.all(1.5),
-                                decoration: BoxDecoration(
-                                  color: color.withOpacity(0.7),
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: isColorSelected ? Colors.amber[700]! : Colors.grey[300]!,
-                                    width: isColorSelected ? 2.5 : 1,
-                                  ),
-                                ),
-                                child: isColorSelected
-                                    ? Icon(Icons.check, size: 14, color: Colors.amber[900])
-                                    : null,
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
-                    // 구분선
-                    Container(
-                      width: 1,
-                      height: 70,
-                      margin: const EdgeInsets.symmetric(horizontal: 10),
-                      color: Colors.grey[300],
-                    ),
-                    // 굵기 섹션
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '굵기',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: QuickToolbar.highlighterWidthPresets.take(5).map((width) {
-                            final isWidthSelected = (widget.currentWidth - width).abs() < 0.1;
-                            return Tooltip(
-                              message: _formatWidth(width),
-                              child: GestureDetector(
-                                onTap: () {
-                                  widget.onWidthChanged(width);
-                                  Navigator.pop(context);
-                                },
-                                child: Container(
-                                  width: 28,
-                                  height: 28,
-                                  margin: const EdgeInsets.symmetric(horizontal: 2),
-                                  decoration: BoxDecoration(
-                                    color: isWidthSelected ? Colors.amber.withOpacity(0.2) : null,
-                                    borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(
-                                      color: isWidthSelected ? Colors.amber[700]! : Colors.grey[300]!,
-                                      width: isWidthSelected ? 2 : 1,
-                                    ),
-                                  ),
-                                  child: Center(
-                                    child: Text(
-                                      '${width.toInt()}',
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        fontWeight: isWidthSelected ? FontWeight.bold : FontWeight.normal,
-                                        // 선택 안됐을 때도 글자가 잘 보이도록 더 진한 색상 사용
-                                        color: isWidthSelected ? Colors.amber[800] : Colors.grey[800],
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
-                    // 구분선
-                    Container(
-                      width: 1,
-                      height: 70,
-                      margin: const EdgeInsets.symmetric(horizontal: 10),
-                      color: Colors.grey[300],
-                    ),
-                    // 투명도 섹션
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '투명도',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.grey[600],
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: QuickToolbar.highlighterOpacityPresets.take(5).map((opacity) {
-                            final isOpacitySelected = (widget.highlighterOpacity - opacity).abs() < 0.05;
-                            return Tooltip(
-                              message: '${(opacity * 100).toInt()}%',
-                              child: GestureDetector(
-                                onTap: () {
-                                  widget.onHighlighterOpacityChanged(opacity);
-                                  Navigator.pop(context);
-                                },
-                                child: Container(
-                                  width: 28,
-                                  height: 28,
-                                  margin: const EdgeInsets.symmetric(horizontal: 2),
-                                  decoration: BoxDecoration(
-                                    color: isOpacitySelected ? Colors.amber.withOpacity(0.2) : null,
-                                    borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(
-                                      color: isOpacitySelected ? Colors.amber[700]! : Colors.grey[300]!,
-                                      width: isOpacitySelected ? 2 : 1,
-                                    ),
-                                  ),
-                                  child: Center(
-                                    child: Text(
-                                      '${(opacity * 100).toInt()}',
-                                      style: TextStyle(
-                                        fontSize: 9,
-                                        fontWeight: isOpacitySelected ? FontWeight.bold : FontWeight.normal,
-                                        color: isOpacitySelected ? Colors.amber[800] : Colors.grey[600],
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
-                  ],
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final currentHighlighterColor = widget.currentColor.withOpacity(1.0);
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: () {
+                    // 패널 내에서 모든 항목을 선택했으면 닫기
+                    if (colorSelectedInPanel && widthSelectedInPanel && opacitySelectedInPanel) {
+                      Navigator.pop(context);
+                    }
+                  },
+                  child: Container(color: Colors.transparent),
                 ),
               ),
-            ),
-          ),
-        ],
+              Positioned(
+                left: buttonPosition.dx - 100,
+                top: buttonPosition.dy - 110,
+                child: Material(
+                  elevation: 8,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // 색상 섹션 (2줄 레이아웃)
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '색상',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            // 1열 (5개)
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: QuickToolbar.highlighterColors.take(5).map((color) {
+                                final isThisColorSelected = currentHighlighterColor.value == color.value;
+                                return GestureDetector(
+                                  onTap: () {
+                                    widget.onColorChanged(color);
+                                    colorSelectedInPanel = true;
+                                    setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                    // 모두 선택되면 닫기
+                                    if (widthSelectedInPanel && opacitySelectedInPanel) {
+                                      Navigator.pop(context);
+                                    }
+                                  },
+                                  child: Container(
+                                    width: 26,
+                                    height: 26,
+                                    margin: const EdgeInsets.all(1.5),
+                                    decoration: BoxDecoration(
+                                      color: color.withOpacity(0.7),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(
+                                        color: isThisColorSelected ? Colors.amber[700]! : Colors.grey[300]!,
+                                        width: isThisColorSelected ? 2.5 : 1,
+                                      ),
+                                    ),
+                                    child: isThisColorSelected
+                                        ? Icon(Icons.check, size: 14, color: Colors.amber[900])
+                                        : null,
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                            // 2열 (5개)
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: QuickToolbar.highlighterColors.skip(5).map((color) {
+                                final isThisColorSelected = currentHighlighterColor.value == color.value;
+                                return GestureDetector(
+                                  onTap: () {
+                                    widget.onColorChanged(color);
+                                    colorSelectedInPanel = true;
+                                    setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                    // 모두 선택되면 닫기
+                                    if (widthSelectedInPanel && opacitySelectedInPanel) {
+                                      Navigator.pop(context);
+                                    }
+                                  },
+                                  child: Container(
+                                    width: 26,
+                                    height: 26,
+                                    margin: const EdgeInsets.all(1.5),
+                                    decoration: BoxDecoration(
+                                      color: color.withOpacity(0.7),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(
+                                        color: isThisColorSelected ? Colors.amber[700]! : Colors.grey[300]!,
+                                        width: isThisColorSelected ? 2.5 : 1,
+                                      ),
+                                    ),
+                                    child: isThisColorSelected
+                                        ? Icon(Icons.check, size: 14, color: Colors.amber[900])
+                                        : null,
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ],
+                        ),
+                        // 구분선
+                        Container(
+                          width: 1,
+                          height: 70,
+                          margin: const EdgeInsets.symmetric(horizontal: 10),
+                          color: Colors.grey[300],
+                        ),
+                        // 굵기 섹션
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '굵기',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: QuickToolbar.highlighterWidthPresets.take(5).map((width) {
+                                final isThisWidthSelected = (widget.currentWidth - width).abs() < 0.1;
+                                return Tooltip(
+                                  message: _formatWidth(width),
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      widget.onWidthChanged(width);
+                                      widthSelectedInPanel = true;
+                                      setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                      // 모두 선택되면 닫기
+                                      if (colorSelectedInPanel && opacitySelectedInPanel) {
+                                        Navigator.pop(context);
+                                      }
+                                    },
+                                    child: Container(
+                                      width: 28,
+                                      height: 28,
+                                      margin: const EdgeInsets.symmetric(horizontal: 2),
+                                      decoration: BoxDecoration(
+                                        color: isThisWidthSelected ? Colors.amber.withOpacity(0.2) : null,
+                                        borderRadius: BorderRadius.circular(6),
+                                        border: Border.all(
+                                          color: isThisWidthSelected ? Colors.amber[700]! : Colors.grey[300]!,
+                                          width: isThisWidthSelected ? 2 : 1,
+                                        ),
+                                      ),
+                                      child: Center(
+                                        child: Text(
+                                          '${width.toInt()}',
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            fontWeight: isThisWidthSelected ? FontWeight.bold : FontWeight.normal,
+                                            // 선택 안됐을 때도 글자가 잘 보이도록 더 진한 색상 사용
+                                            color: isThisWidthSelected ? Colors.amber[800] : Colors.grey[800],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ],
+                        ),
+                        // 구분선
+                        Container(
+                          width: 1,
+                          height: 70,
+                          margin: const EdgeInsets.symmetric(horizontal: 10),
+                          color: Colors.grey[300],
+                        ),
+                        // 투명도 섹션
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '투명도',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: QuickToolbar.highlighterOpacityPresets.take(5).map((opacity) {
+                                final isThisOpacitySelected = (widget.highlighterOpacity - opacity).abs() < 0.05;
+                                return Tooltip(
+                                  message: '${(opacity * 100).toInt()}%',
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      widget.onHighlighterOpacityChanged(opacity);
+                                      opacitySelectedInPanel = true;
+                                      setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                      // 모두 선택되면 닫기
+                                      if (colorSelectedInPanel && widthSelectedInPanel) {
+                                        Navigator.pop(context);
+                                      }
+                                    },
+                                    child: Container(
+                                      width: 28,
+                                      height: 28,
+                                      margin: const EdgeInsets.symmetric(horizontal: 2),
+                                      decoration: BoxDecoration(
+                                        color: isThisOpacitySelected ? Colors.amber.withOpacity(0.2) : null,
+                                        borderRadius: BorderRadius.circular(6),
+                                        border: Border.all(
+                                          color: isThisOpacitySelected ? Colors.amber[700]! : Colors.grey[300]!,
+                                          width: isThisOpacitySelected ? 2 : 1,
+                                        ),
+                                      ),
+                                      child: Center(
+                                        child: Text(
+                                          '${(opacity * 100).toInt()}',
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            fontWeight: isThisOpacitySelected ? FontWeight.bold : FontWeight.normal,
+                                            color: isThisOpacitySelected ? Colors.amber[800] : Colors.grey[800],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1088,85 +1148,98 @@ class _QuickToolbarState extends State<QuickToolbar> {
     final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final buttonPosition = button.localToGlobal(Offset.zero, ancestor: overlay);
 
+    // 패널 내에서 선택했는지 추적하는 플래그
+    bool widthSelectedInPanel = false;
+
     showDialog(
       context: context,
       barrierColor: Colors.transparent,
-      builder: (context) => Stack(
-        children: [
-          Positioned.fill(
-            child: GestureDetector(
-              onTap: () => Navigator.pop(context),
-              child: Container(color: Colors.transparent),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () {
+                  // 패널 내에서 크기를 선택했으면 닫기
+                  if (widthSelectedInPanel) {
+                    Navigator.pop(context);
+                  }
+                },
+                child: Container(color: Colors.transparent),
+              ),
             ),
-          ),
-          Positioned(
-            left: buttonPosition.dx - 40,
-            top: buttonPosition.dy - 90,
-            child: Material(
-              elevation: 8,
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      '지우개 크기',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey[600],
+            Positioned(
+              left: buttonPosition.dx - 40,
+              top: buttonPosition.dy - 90,
+              child: Material(
+                elevation: 8,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '지우개 크기',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey[600],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: QuickToolbar.eraserWidths.map((width) {
-                        final isWidthSelected = (widget.eraserWidth - width).abs() < 0.5;
-                        return Tooltip(
-                          message: '${width.toInt()}px',
-                          child: GestureDetector(
-                            onTap: () {
-                              widget.onEraserWidthChanged(width);
-                              Navigator.pop(context);
-                            },
-                            child: Container(
-                              width: 32,
-                              height: 32,
-                              margin: const EdgeInsets.symmetric(horizontal: 4),
-                              decoration: BoxDecoration(
-                                color: isWidthSelected ? Colors.orange.withOpacity(0.2) : null,
-                                borderRadius: BorderRadius.circular(6),
-                                border: Border.all(
-                                  color: isWidthSelected ? Colors.orange : Colors.grey[300]!,
-                                  width: isWidthSelected ? 2 : 1,
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: QuickToolbar.eraserWidths.map((width) {
+                          final isThisWidthSelected = (widget.eraserWidth - width).abs() < 0.5;
+                          return Tooltip(
+                            message: '${width.toInt()}px',
+                            child: GestureDetector(
+                              onTap: () {
+                                widget.onEraserWidthChanged(width);
+                                widthSelectedInPanel = true;
+                                setDialogState(() {}); // 다이얼로그 상태 업데이트
+                                // 선택되면 닫기 (지우개는 굵기만 선택하면 됨)
+                                Navigator.pop(context);
+                              },
+                              child: Container(
+                                width: 32,
+                                height: 32,
+                                margin: const EdgeInsets.symmetric(horizontal: 4),
+                                decoration: BoxDecoration(
+                                  color: isThisWidthSelected ? Colors.orange.withOpacity(0.2) : null,
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(
+                                    color: isThisWidthSelected ? Colors.orange : Colors.grey[300]!,
+                                    width: isThisWidthSelected ? 2 : 1,
+                                  ),
                                 ),
-                              ),
-                              child: Center(
-                                child: Text(
-                                  '${width.toInt()}',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: isWidthSelected ? FontWeight.bold : FontWeight.normal,
-                                    color: isWidthSelected ? Colors.orange : Colors.grey[600],
+                                child: Center(
+                                  child: Text(
+                                    '${width.toInt()}',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: isThisWidthSelected ? FontWeight.bold : FontWeight.normal,
+                                      color: isThisWidthSelected ? Colors.orange : Colors.grey[800],
+                                    ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                  ],
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
