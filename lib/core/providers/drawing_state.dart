@@ -19,11 +19,12 @@ enum DrawingTool {
 
 /// Page template types for different note styles
 enum PageTemplate {
-  blank,      // 빈 페이지
-  lined,      // 줄 노트
-  grid,       // 격자 노트
-  dotted,     // 점 노트
-  cornell,    // 코넬 노트
+  blank,        // 빈 페이지
+  lined,        // 줄 노트
+  grid,         // 격자 노트
+  dotted,       // 점 노트
+  cornell,      // 코넬 노트
+  customImage,  // 커스텀 이미지 배경 (Canva 등에서 가져온 이미지)
 }
 
 /// Drawing state provider for managing canvas state
@@ -57,9 +58,10 @@ class DrawingState extends ChangeNotifier {
   SmoothingLevel get smoothingLevel => _smoothingLevel;
 
   // Strokes and history for undo/redo
+  // 최적화: 델타 기반 undo/redo (전체 복사 대신 변경분만 저장)
   List<Stroke> _strokes = [];
-  final List<List<Stroke>> _undoStack = [];
-  final List<List<Stroke>> _redoStack = [];
+  final List<_UndoAction> _undoStack = [];
+  final List<_UndoAction> _redoStack = [];
   static const int _maxHistorySize = 50;
 
   List<Stroke> get strokes => _strokes;
@@ -141,7 +143,7 @@ class DrawingState extends ChangeNotifier {
 
   /// Set eraser width
   void setEraserWidth(double width) {
-    _eraserWidth = width.clamp(5.0, 100.0);
+    _eraserWidth = width.clamp(5.0, 150.0);
     notifyListeners();
   }
 
@@ -196,53 +198,56 @@ class DrawingState extends ChangeNotifier {
     }
   }
 
-  /// Save current state for undo
-  void _saveState() {
-    _undoStack.add(List.from(_strokes));
-    if (_undoStack.length > _maxHistorySize) {
-      _undoStack.removeAt(0);
-    }
-    _redoStack.clear();
-  }
-
-  /// Add a stroke
+  /// Add a stroke (최적화: 델타 기반)
   void addStroke(Stroke stroke) {
-    _saveState();
+    _pushUndo(_UndoAction.add(stroke));
     _strokes.add(stroke);
     notifyListeners();
   }
 
   /// Set all strokes (used when loading or replacing)
   void setStrokes(List<Stroke> strokes) {
-    _saveState();
+    // 전체 교체는 스냅샷으로 저장 (드물게 발생)
+    _pushUndo(_UndoAction.replace(List.from(_strokes)));
     _strokes = List.from(strokes);
     notifyListeners();
   }
 
-  /// Undo last action
+  /// Undo last action (최적화: 델타 역적용)
   void undo() {
     if (_undoStack.isEmpty) return;
 
-    _redoStack.add(List.from(_strokes));
-    _strokes = _undoStack.removeLast();
+    final action = _undoStack.removeLast();
+    _redoStack.add(action.createInverse(_strokes));
+    action.undo(_strokes);
     notifyListeners();
   }
 
-  /// Redo last undone action
+  /// Redo last undone action (최적화: 델타 재적용)
   void redo() {
     if (_redoStack.isEmpty) return;
 
-    _undoStack.add(List.from(_strokes));
-    _strokes = _redoStack.removeLast();
+    final action = _redoStack.removeLast();
+    _undoStack.add(action.createInverse(_strokes));
+    action.undo(_strokes);
     notifyListeners();
   }
 
   /// Clear all strokes
   void clear() {
     if (_strokes.isEmpty) return;
-    _saveState();
+    _pushUndo(_UndoAction.replace(List.from(_strokes)));
     _strokes.clear();
     notifyListeners();
+  }
+
+  /// Push undo action with size limit
+  void _pushUndo(_UndoAction action) {
+    _undoStack.add(action);
+    if (_undoStack.length > _maxHistorySize) {
+      _undoStack.removeAt(0);
+    }
+    _redoStack.clear();
   }
 
   /// Erase strokes at a point (partial erasing - splits strokes)
@@ -272,7 +277,8 @@ class DrawingState extends ChangeNotifier {
     }
 
     if (toRemove.isNotEmpty) {
-      _saveState();
+      // 지우기 작업도 델타 기반으로 저장
+      _pushUndo(_UndoAction.erase(toRemove, toAdd));
       for (final stroke in toRemove) {
         _strokes.remove(stroke);
       }
@@ -336,5 +342,93 @@ class DrawingState extends ChangeNotifier {
     _scale = 1.0;
     _offset = Offset.zero;
     notifyListeners();
+  }
+}
+
+/// Undo 액션 타입
+enum _UndoActionType {
+  add,     // 스트로크 추가
+  erase,   // 스트로크 지우기 (분할 포함)
+  replace, // 전체 교체 (스냅샷)
+}
+
+/// 델타 기반 Undo 액션 (메모리 최적화)
+class _UndoAction {
+  final _UndoActionType type;
+  final Stroke? addedStroke;           // add: 추가된 스트로크
+  final List<Stroke>? removedStrokes;  // erase: 제거된 스트로크들
+  final List<Stroke>? addedStrokes;    // erase: 분할로 추가된 스트로크들
+  final List<Stroke>? snapshot;        // replace: 전체 스냅샷
+
+  _UndoAction._({
+    required this.type,
+    this.addedStroke,
+    this.removedStrokes,
+    this.addedStrokes,
+    this.snapshot,
+  });
+
+  /// 스트로크 추가 액션
+  factory _UndoAction.add(Stroke stroke) {
+    return _UndoAction._(type: _UndoActionType.add, addedStroke: stroke);
+  }
+
+  /// 스트로크 지우기 액션 (분할 포함)
+  factory _UndoAction.erase(List<Stroke> removed, List<Stroke> added) {
+    return _UndoAction._(
+      type: _UndoActionType.erase,
+      removedStrokes: List.from(removed),
+      addedStrokes: List.from(added),
+    );
+  }
+
+  /// 전체 교체 액션 (clear, setStrokes 등)
+  factory _UndoAction.replace(List<Stroke> previousStrokes) {
+    return _UndoAction._(type: _UndoActionType.replace, snapshot: previousStrokes);
+  }
+
+  /// Undo 실행 (역방향 적용)
+  void undo(List<Stroke> strokes) {
+    switch (type) {
+      case _UndoActionType.add:
+        // 추가된 스트로크 제거
+        strokes.removeWhere((s) => s.id == addedStroke!.id);
+        break;
+      case _UndoActionType.erase:
+        // 분할된 스트로크 제거하고 원본 복원
+        for (final added in addedStrokes!) {
+          strokes.removeWhere((s) => s.id == added.id);
+        }
+        strokes.addAll(removedStrokes!);
+        break;
+      case _UndoActionType.replace:
+        // 스냅샷으로 복원
+        strokes.clear();
+        strokes.addAll(snapshot!);
+        break;
+    }
+  }
+
+  /// Redo를 위한 역방향 액션 생성
+  _UndoAction createInverse(List<Stroke> currentStrokes) {
+    switch (type) {
+      case _UndoActionType.add:
+        // redo: 다시 추가
+        return _UndoAction._(
+          type: _UndoActionType.erase,
+          removedStrokes: [],
+          addedStrokes: [addedStroke!],
+        );
+      case _UndoActionType.erase:
+        // redo: 다시 지우기
+        return _UndoAction._(
+          type: _UndoActionType.erase,
+          removedStrokes: addedStrokes,
+          addedStrokes: removedStrokes,
+        );
+      case _UndoActionType.replace:
+        // redo: 현재 상태를 스냅샷으로
+        return _UndoAction.replace(List.from(currentStrokes));
+    }
   }
 }

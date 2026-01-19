@@ -140,34 +140,70 @@ class StrokeSmoothingService {
     }
   }
 
-  /// Ramer-Douglas-Peucker 알고리즘 (점 단순화)
+  /// Ramer-Douglas-Peucker 알고리즘 (점 단순화) - 반복적 구현으로 스택 오버플로우 방지 및 성능 개선
   List<StrokePoint> _rdpSimplify(List<StrokePoint> points, double epsilon) {
     if (points.length < 3) return List.from(points);
 
-    // 가장 먼 점 찾기
-    double maxDistance = 0;
-    int maxIndex = 0;
+    // 매우 긴 스트로크는 먼저 샘플링하여 처리 시간 단축
+    final workingPoints = points.length > 500
+        ? _samplePoints(points, 500)
+        : points;
 
-    final start = points.first;
-    final end = points.last;
+    // 결과에 포함할 인덱스를 저장할 Set (중복 방지)
+    final keepIndices = <int>{0, workingPoints.length - 1};
 
-    for (int i = 1; i < points.length - 1; i++) {
-      final d = _perpendicularDistance(points[i], start, end);
-      if (d > maxDistance) {
-        maxDistance = d;
-        maxIndex = i;
+    // 처리할 구간을 저장할 스택 (시작 인덱스, 끝 인덱스)
+    final stack = <(int, int)>[(0, workingPoints.length - 1)];
+
+    while (stack.isNotEmpty) {
+      final (startIdx, endIdx) = stack.removeLast();
+
+      if (endIdx - startIdx < 2) continue;
+
+      // 가장 먼 점 찾기
+      double maxDistance = 0;
+      int maxIndex = startIdx;
+
+      final start = workingPoints[startIdx];
+      final end = workingPoints[endIdx];
+
+      for (int i = startIdx + 1; i < endIdx; i++) {
+        final d = _perpendicularDistance(workingPoints[i], start, end);
+        if (d > maxDistance) {
+          maxDistance = d;
+          maxIndex = i;
+        }
+      }
+
+      // 임계값보다 크면 해당 점을 유지하고 양쪽 구간을 스택에 추가
+      if (maxDistance > epsilon) {
+        keepIndices.add(maxIndex);
+        stack.add((startIdx, maxIndex));
+        stack.add((maxIndex, endIdx));
       }
     }
 
-    // 임계값보다 크면 재귀적으로 분할
-    if (maxDistance > epsilon) {
-      final left = _rdpSimplify(points.sublist(0, maxIndex + 1), epsilon);
-      final right = _rdpSimplify(points.sublist(maxIndex), epsilon);
+    // 정렬된 인덱스 순서로 포인트 추출
+    final sortedIndices = keepIndices.toList()..sort();
+    return sortedIndices.map((i) => workingPoints[i]).toList();
+  }
 
-      return [...left.sublist(0, left.length - 1), ...right];
-    } else {
-      return [start, end];
+  /// 포인트 샘플링 (매우 긴 스트로크 처리 최적화)
+  List<StrokePoint> _samplePoints(List<StrokePoint> points, int targetCount) {
+    if (points.length <= targetCount) return points;
+
+    final result = <StrokePoint>[points.first];
+    final step = (points.length - 1) / (targetCount - 1);
+
+    for (int i = 1; i < targetCount - 1; i++) {
+      final index = (i * step).round();
+      if (index < points.length) {
+        result.add(points[index]);
+      }
     }
+
+    result.add(points.last);
+    return result;
   }
 
   /// 점에서 선분까지의 수직 거리

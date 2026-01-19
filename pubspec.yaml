@@ -26,6 +26,7 @@ dependencies:
 
   # PDF
   syncfusion_flutter_pdfviewer: ^28.1.0
+  syncfusion_flutter_pdf: ^28.1.0
 
   # 유틸리티
   uuid: ^4.2.0

@@ -63,6 +63,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   double _eraserWidth = 20.0;
 
   PageTemplate _currentTemplate = PageTemplate.grid;
+  String? _backgroundImagePath; // 커스텀 배경 이미지 경로
+  PageTemplate? _overlayTemplate; // 배경 이미지 위에 표시할 템플릿
 
   // Stroke smoothing
   SmoothingLevel _smoothingLevel = SmoothingLevel.medium;
@@ -91,6 +93,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   // Image editing state
   bool _showImageEditToolbar = false;
+
+  // 성능 최적화: 슬라이더 변경 디바운스 타이머
+  Timer? _sliderDebounceTimer;
 
   // Debug overlay (from settings)
   bool _showDebugOverlay = false;
@@ -122,9 +127,20 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   @override
   void dispose() {
     _autoSaveTimer?.cancel();
+    _sliderDebounceTimer?.cancel();
     _canUndoNotifier.dispose();
     _canRedoNotifier.dispose();
     super.dispose();
+  }
+
+  /// 슬라이더 변경 시 디바운스 적용 (성능 최적화)
+  void _debouncedSetHasChanges() {
+    _sliderDebounceTimer?.cancel();
+    _sliderDebounceTimer = Timer(const Duration(milliseconds: 100), () {
+      if (mounted && !_hasChanges) {
+        setState(() => _hasChanges = true);
+      }
+    });
   }
 
   void _loadSettings() {
@@ -236,7 +252,24 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       // Get strokes from current page by index
       List<Stroke> strokes = [];
       if (_currentPageIndex < _currentNote!.pages.length) {
-        strokes = _currentNote!.pages[_currentPageIndex].strokes;
+        final page = _currentNote!.pages[_currentPageIndex];
+        strokes = page.strokes;
+
+        // 페이지별 배경 이미지 및 오버레이 템플릿 로드
+        setState(() {
+          _backgroundImagePath = page.backgroundImagePath;
+          if (page.overlayTemplateIndex != null) {
+            _overlayTemplate = PageTemplate.values[page.overlayTemplateIndex!];
+          } else {
+            _overlayTemplate = null;
+          }
+          // 배경 이미지가 있으면 템플릿을 customImage로, 없으면 templateIndex 사용
+          if (page.backgroundImagePath != null) {
+            _currentTemplate = PageTemplate.customImage;
+          } else if (page.templateIndex != null) {
+            _currentTemplate = PageTemplate.values[page.templateIndex!];
+          }
+        });
       }
       _canvasKey.currentState?.loadStrokes(strokes);
       _updateUndoRedoState();
@@ -268,6 +301,16 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       final mergedShapes = [...pdfBackgrounds, ...nonPdfShapes];
 
       _currentNote = _currentNote!.updatePageShapes(pageNumber, mergedShapes);
+
+      // 배경 이미지 및 오버레이 템플릿 저장
+      _currentNote = _currentNote!.updatePageBackground(
+        pageNumber,
+        backgroundImagePath: _backgroundImagePath,
+        clearBackgroundImage: _backgroundImagePath == null,
+        overlayTemplateIndex: _overlayTemplate?.index,
+        clearOverlayTemplateIndex: _overlayTemplate == null,
+        templateIndex: _currentTemplate.index,
+      );
     }
   }
 
@@ -367,6 +410,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                             toolType: _toolTypeFromDrawingTool(_currentTool),
                             drawingTool: _currentTool,
                             pageTemplate: _currentTemplate,
+                            backgroundImagePath: _backgroundImagePath,
+                            overlayTemplate: _overlayTemplate,
                             lassoColor: _currentColor,
                             laserPointerColor: _laserPointerColor,
                             presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
@@ -452,7 +497,21 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                           setState(() => _highlighterOpacity = opacity);
                         },
                         onTemplateChanged: (template) {
-                          setState(() => _currentTemplate = template);
+                          setState(() {
+                            // 배경 이미지가 있으면 overlayTemplate을 변경
+                            if (_backgroundImagePath != null) {
+                              // blank나 customImage 선택 시 오버레이 제거, 아니면 오버레이 설정
+                              if (template == PageTemplate.blank || template == PageTemplate.customImage) {
+                                _overlayTemplate = null;
+                              } else {
+                                _overlayTemplate = template;
+                              }
+                            } else {
+                              // 배경 이미지가 없으면 기본 템플릿 변경
+                              _currentTemplate = template;
+                            }
+                            _hasChanges = true;
+                          });
                         },
                         onCopySelection: () {
                           _canvasKey.currentState?.copySelection();
@@ -471,6 +530,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         onInsertImage: _insertImage,
                         onInsertText: _insertTextBox,
                         onInsertTable: _showInsertTableDialog,
+                        onSelectBackgroundImage: _selectBackgroundImage,
+                        onClearBackgroundImage: _clearBackgroundImage,
+                        hasBackgroundImage: _backgroundImagePath != null,
+                        overlayTemplate: _overlayTemplate,
                         laserPointerColor: _laserPointerColor,
                         onLaserPointerColorChanged: (color) {
                           setState(() => _laserPointerColor = color);
@@ -496,11 +559,13 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         opacity: _canvasKey.currentState?.selectedImage?.opacity ?? 1.0,
                         onRotationChanged: (rotation) {
                           _canvasKey.currentState?.updateImageRotation(rotation);
-                          setState(() => _hasChanges = true);
+                          // 성능 최적화: 슬라이더 조작 중 setState 디바운스
+                          _debouncedSetHasChanges();
                         },
                         onOpacityChanged: (opacity) {
                           _canvasKey.currentState?.updateImageOpacity(opacity);
-                          setState(() => _hasChanges = true);
+                          // 성능 최적화: 슬라이더 조작 중 setState 디바운스
+                          _debouncedSetHasChanges();
                         },
                         onDelete: () {
                           _canvasKey.currentState?.deleteSelectedImage();
@@ -1391,6 +1456,67 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     } catch (e) {
       debugPrint('이미지 삽입 실패: $e');
     }
+  }
+
+  /// 배경 이미지 선택 (Canva 등에서 내보낸 이미지를 노트 템플릿으로 사용)
+  Future<void> _selectBackgroundImage() async {
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+
+      if (pickedFile == null) return;
+
+      // Copy image to app's backgrounds directory for persistence
+      final appDir = await getApplicationDocumentsDirectory();
+      final backgroundsDir = Directory('${appDir.path}${Platform.pathSeparator}Winote${Platform.pathSeparator}backgrounds');
+      if (!await backgroundsDir.exists()) {
+        await backgroundsDir.create(recursive: true);
+      }
+
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}${path.extension(pickedFile.path)}';
+      final savedPath = '${backgroundsDir.path}${Platform.pathSeparator}$fileName';
+
+      await File(pickedFile.path).copy(savedPath);
+
+      // 배경 이미지 설정 및 템플릿을 customImage로 변경
+      // 기존 템플릿이 있으면 overlayTemplate으로 보존 (배경 이미지 위에 줄/격자/점 표시)
+      setState(() {
+        // 기존 템플릿이 blank나 customImage가 아니면 오버레이로 보존
+        if (_currentTemplate != PageTemplate.blank && _currentTemplate != PageTemplate.customImage) {
+          _overlayTemplate = _currentTemplate;
+        }
+        _backgroundImagePath = savedPath;
+        _currentTemplate = PageTemplate.customImage;
+        _hasChanges = true;
+      });
+
+      _scheduleAutoSave();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('배경 이미지가 설정되었습니다'), duration: Duration(seconds: 2)),
+        );
+      }
+    } catch (e) {
+      debugPrint('배경 이미지 선택 실패: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('배경 이미지 선택 실패: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  /// 배경 이미지 제거
+  void _clearBackgroundImage() {
+    setState(() {
+      _backgroundImagePath = null;
+      // overlayTemplate이 있으면 그것을 기본 템플릿으로 복원, 없으면 grid
+      _currentTemplate = _overlayTemplate ?? PageTemplate.grid;
+      _overlayTemplate = null;
+      _hasChanges = true;
+    });
+    _scheduleAutoSave();
   }
 
   void _insertTextBox() {

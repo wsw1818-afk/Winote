@@ -11,11 +11,17 @@ class NotePage {
   final int pageNumber;
   final List<Stroke> strokes;
   final List<CanvasShape> shapes;
+  final String? backgroundImagePath; // 커스텀 배경 이미지 경로 (Canva 등에서 가져온 이미지)
+  final int? templateIndex; // PageTemplate enum index (저장용)
+  final int? overlayTemplateIndex; // 배경 이미지 위에 표시할 템플릿 (lined, grid, dotted 등)
 
   NotePage({
     required this.pageNumber,
     required this.strokes,
     this.shapes = const [],
+    this.backgroundImagePath,
+    this.templateIndex,
+    this.overlayTemplateIndex,
   });
 
   Map<String, dynamic> toJson() {
@@ -23,6 +29,9 @@ class NotePage {
       'pageNumber': pageNumber,
       'strokes': strokes.map((s) => _strokeToJson(s)).toList(),
       'shapes': shapes.map((s) => s.toJson()).toList(),
+      if (backgroundImagePath != null) 'backgroundImagePath': backgroundImagePath,
+      if (templateIndex != null) 'templateIndex': templateIndex,
+      if (overlayTemplateIndex != null) 'overlayTemplateIndex': overlayTemplateIndex,
     };
   }
 
@@ -37,6 +46,9 @@ class NotePage {
               .map((s) => CanvasShape.fromJson(s as Map<String, dynamic>))
               .toList()
           : [],
+      backgroundImagePath: json['backgroundImagePath'] as String?,
+      templateIndex: json['templateIndex'] as int?,
+      overlayTemplateIndex: json['overlayTemplateIndex'] as int?,
     );
   }
 
@@ -44,11 +56,20 @@ class NotePage {
     int? pageNumber,
     List<Stroke>? strokes,
     List<CanvasShape>? shapes,
+    String? backgroundImagePath,
+    bool clearBackgroundImage = false,
+    int? templateIndex,
+    bool clearTemplateIndex = false,
+    int? overlayTemplateIndex,
+    bool clearOverlayTemplateIndex = false,
   }) {
     return NotePage(
       pageNumber: pageNumber ?? this.pageNumber,
       strokes: strokes ?? List.from(this.strokes),
       shapes: shapes ?? List.from(this.shapes),
+      backgroundImagePath: clearBackgroundImage ? null : (backgroundImagePath ?? this.backgroundImagePath),
+      templateIndex: clearTemplateIndex ? null : (templateIndex ?? this.templateIndex),
+      overlayTemplateIndex: clearOverlayTemplateIndex ? null : (overlayTemplateIndex ?? this.overlayTemplateIndex),
     );
   }
 
@@ -271,6 +292,51 @@ class Note {
 
     if (!pageFound) {
       newPages.add(NotePage(pageNumber: pageNumber, strokes: [], shapes: shapes));
+      newPages.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    }
+
+    return copyWith(
+      pages: newPages,
+      modifiedAt: DateTime.now(),
+    );
+  }
+
+  /// Update background image and overlay template for a specific page
+  Note updatePageBackground(int pageNumber, {
+    String? backgroundImagePath,
+    bool clearBackgroundImage = false,
+    int? overlayTemplateIndex,
+    bool clearOverlayTemplateIndex = false,
+    int? templateIndex,
+    bool clearTemplateIndex = false,
+  }) {
+    final newPages = <NotePage>[];
+    bool pageFound = false;
+
+    for (final page in pages) {
+      if (page.pageNumber == pageNumber) {
+        newPages.add(page.copyWith(
+          backgroundImagePath: backgroundImagePath,
+          clearBackgroundImage: clearBackgroundImage,
+          overlayTemplateIndex: overlayTemplateIndex,
+          clearOverlayTemplateIndex: clearOverlayTemplateIndex,
+          templateIndex: templateIndex,
+          clearTemplateIndex: clearTemplateIndex,
+        ));
+        pageFound = true;
+      } else {
+        newPages.add(page);
+      }
+    }
+
+    if (!pageFound) {
+      newPages.add(NotePage(
+        pageNumber: pageNumber,
+        strokes: [],
+        backgroundImagePath: backgroundImagePath,
+        overlayTemplateIndex: overlayTemplateIndex,
+        templateIndex: templateIndex,
+      ));
       newPages.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
     }
 

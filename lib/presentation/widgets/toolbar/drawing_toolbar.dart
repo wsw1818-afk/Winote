@@ -4,6 +4,10 @@ import 'package:flutter/material.dart';
 /// (도구 선택 및 펜 굵기는 QuickToolbar에서 담당)
 class DrawingToolbar extends StatelessWidget {
   final Color currentColor;
+  // ValueNotifier로 undo/redo 상태를 받아 해당 버튼만 rebuild
+  final ValueNotifier<bool>? canUndoNotifier;
+  final ValueNotifier<bool>? canRedoNotifier;
+  // 레거시 지원 (ValueNotifier 없을 때)
   final bool canUndo;
   final bool canRedo;
   final VoidCallback? onUndo;
@@ -14,6 +18,8 @@ class DrawingToolbar extends StatelessWidget {
   const DrawingToolbar({
     super.key,
     required this.currentColor,
+    this.canUndoNotifier,
+    this.canRedoNotifier,
     this.canUndo = false,
     this.canRedo = false,
     this.onUndo,
@@ -39,17 +45,37 @@ class DrawingToolbar extends StatelessWidget {
       child: SafeArea(
         child: Row(
           children: [
-            // Undo/Redo buttons
-            _buildIconButton(
-              icon: Icons.undo,
-              onPressed: canUndo ? onUndo : null,
-              tooltip: '실행 취소',
-            ),
-            _buildIconButton(
-              icon: Icons.redo,
-              onPressed: canRedo ? onRedo : null,
-              tooltip: '다시 실행',
-            ),
+            // Undo/Redo buttons - ValueNotifier 사용 시 해당 버튼만 rebuild
+            if (canUndoNotifier != null)
+              ValueListenableBuilder<bool>(
+                valueListenable: canUndoNotifier!,
+                builder: (context, canUndoValue, _) => _buildIconButton(
+                  icon: Icons.undo,
+                  onPressed: canUndoValue ? onUndo : null,
+                  tooltip: '실행 취소',
+                ),
+              )
+            else
+              _buildIconButton(
+                icon: Icons.undo,
+                onPressed: canUndo ? onUndo : null,
+                tooltip: '실행 취소',
+              ),
+            if (canRedoNotifier != null)
+              ValueListenableBuilder<bool>(
+                valueListenable: canRedoNotifier!,
+                builder: (context, canRedoValue, _) => _buildIconButton(
+                  icon: Icons.redo,
+                  onPressed: canRedoValue ? onRedo : null,
+                  tooltip: '다시 실행',
+                ),
+              )
+            else
+              _buildIconButton(
+                icon: Icons.redo,
+                onPressed: canRedo ? onRedo : null,
+                tooltip: '다시 실행',
+              ),
             const SizedBox(width: 8),
             Container(width: 1, height: 24, color: Colors.grey[300]),
             const SizedBox(width: 8),

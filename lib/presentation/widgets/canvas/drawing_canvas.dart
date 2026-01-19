@@ -32,6 +32,8 @@ class DrawingCanvas extends StatefulWidget {
   final bool canUndo;
   final bool canRedo;
   final PageTemplate pageTemplate;
+  final String? backgroundImagePath; // 커스텀 배경 이미지 경로
+  final PageTemplate? overlayTemplate; // 배경 이미지 위에 표시할 템플릿 (lined, grid 등)
   final List<CanvasImage>? initialImages;
   final void Function(List<CanvasImage>)? onImagesChanged;
   final List<CanvasText>? initialTexts;
@@ -66,6 +68,8 @@ class DrawingCanvas extends StatefulWidget {
     this.canUndo = false,
     this.canRedo = false,
     this.pageTemplate = PageTemplate.grid,
+    this.backgroundImagePath,
+    this.overlayTemplate,
     this.initialImages,
     this.onImagesChanged,
     this.initialTexts,
@@ -161,6 +165,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   bool _isDraggingSelection = false;
   Offset? _selectionDragStart;
   Offset _selectionOffset = Offset.zero;
+
+  // Background image for custom template
+  ui.Image? _loadedBackgroundImage;
+  String? _lastBackgroundImagePath;
 
   // Images on canvas
   List<CanvasImage> _images = [];
@@ -281,6 +289,27 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     if (widget.initialTables != null) {
       _tables = List.from(widget.initialTables!);
     }
+    // Load background image if custom template
+    if (widget.pageTemplate == PageTemplate.customImage && widget.backgroundImagePath != null) {
+      _loadBackgroundImage(widget.backgroundImagePath!);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant DrawingCanvas oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 배경 이미지 경로가 변경되었을 때 새로 로드
+    if (widget.backgroundImagePath != oldWidget.backgroundImagePath ||
+        widget.pageTemplate != oldWidget.pageTemplate) {
+      if (widget.pageTemplate == PageTemplate.customImage && widget.backgroundImagePath != null) {
+        _loadBackgroundImage(widget.backgroundImagePath!);
+      } else {
+        // 커스텀 이미지가 아니면 배경 이미지 정리
+        _loadedBackgroundImage?.dispose();
+        _loadedBackgroundImage = null;
+        _lastBackgroundImagePath = null;
+      }
+    }
   }
 
   @override
@@ -298,6 +327,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       image.dispose();
     }
     _loadedImages.clear();
+
+    // 배경 이미지 정리
+    _loadedBackgroundImage?.dispose();
+    _loadedBackgroundImage = null;
 
     super.dispose();
   }
@@ -412,6 +445,39 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     }
   }
 
+  /// Load background image for custom template
+  Future<void> _loadBackgroundImage(String path) async {
+    // 이미 같은 이미지가 로드되어 있으면 스킵
+    if (_lastBackgroundImagePath == path && _loadedBackgroundImage != null) {
+      return;
+    }
+
+    try {
+      final file = File(path);
+      if (!await file.exists()) {
+        debugPrint('[DrawingCanvas] Background image not found: $path');
+        return;
+      }
+
+      // 기존 배경 이미지 정리
+      _loadedBackgroundImage?.dispose();
+
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+
+      if (mounted) {
+        setState(() {
+          _loadedBackgroundImage = frame.image;
+          _lastBackgroundImagePath = path;
+        });
+      }
+      debugPrint('[DrawingCanvas] Background image loaded: $path');
+    } catch (e) {
+      debugPrint('[DrawingCanvas] Error loading background image: $e');
+    }
+  }
+
   /// Save current state for undo
   void _saveState() {
     _undoStack.add(List.from(_strokes.map((s) => s.copyWith())));
@@ -511,8 +577,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   }
 
   // Enable performance profiling log (Release 빌드에서는 false로 유지)
-  static const bool _enableVerboseLogging = true;  // 디버그용 활성화
-  static const bool _enablePerformanceLog = true;  // 디버그용 활성화
+  static const bool _enableVerboseLogging = false;  // 성능 최적화: 비활성화
+  static const bool _enablePerformanceLog = false;  // 성능 최적화: 비활성화
 
   // Performance tracking
   int _frameCount = 0;
@@ -556,11 +622,25 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                 ..scale(_scale),
               child: Stack(
                 children: [
-                  // Canvas background (template-based)
-                  CustomPaint(
-                    painter: _TemplatePainter(template: widget.pageTemplate),
-                    size: Size.infinite,
-                  ),
+                  // Canvas background (template-based or custom image)
+                  if (widget.pageTemplate == PageTemplate.customImage && widget.backgroundImagePath != null) ...[
+                    // 커스텀 배경 이미지 (15% 투명도)
+                    _BackgroundImageWidget(
+                      imagePath: widget.backgroundImagePath!,
+                      loadedImage: _loadedBackgroundImage,
+                    ),
+                    // 오버레이 템플릿 (배경 이미지 위에 표시되는 줄/격자/점 등) - 강한 선으로 표시
+                    if (widget.overlayTemplate != null && widget.overlayTemplate != PageTemplate.blank && widget.overlayTemplate != PageTemplate.customImage)
+                      CustomPaint(
+                        painter: _TemplatePainter(template: widget.overlayTemplate!, isOverlay: true),
+                        size: Size.infinite,
+                      ),
+                  ] else
+                    // 기본 템플릿 배경
+                    CustomPaint(
+                      painter: _TemplatePainter(template: widget.pageTemplate),
+                      size: Size.infinite,
+                    ),
                   // Images layer - Key 최적화: 개수만으로 Key 결정 (선택 상태는 shouldRepaint로 처리)
                   RepaintBoundary(
                     key: ValueKey('images_${_images.length}'),
@@ -2438,7 +2518,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         }
 
         _lastFocalPoint = currentFocal;
-        setState(() {});
+        setState(() {});  // 핀치 줌 상태 업데이트
         return;
       }
 
@@ -4037,14 +4117,16 @@ class _PresentationHighlighterPainter extends CustomPainter {
 /// Template background painter - supports multiple page templates
 class _TemplatePainter extends CustomPainter {
   final PageTemplate template;
+  final bool isOverlay; // 배경 이미지 위에 표시되는 오버레이인지 여부
 
-  _TemplatePainter({this.template = PageTemplate.blank});
+  _TemplatePainter({this.template = PageTemplate.blank, this.isOverlay = false});
 
   @override
   void paint(Canvas canvas, Size size) {
+    // 오버레이일 때는 선을 더 강하게 (진하고 두껍게) 표시
     final paint = Paint()
-      ..color = Colors.grey.withOpacity(0.2)
-      ..strokeWidth = 0.5;
+      ..color = isOverlay ? Colors.grey.withOpacity(0.5) : Colors.grey.withOpacity(0.2)
+      ..strokeWidth = isOverlay ? 1.0 : 0.5;
 
     switch (template) {
       case PageTemplate.blank:
@@ -4056,10 +4138,10 @@ class _TemplatePainter extends CustomPainter {
         const lineSpacing = 30.0;
         const marginLeft = 80.0;
 
-        // Draw left margin line (red)
+        // Draw left margin line (red) - 오버레이일 때 더 진하게
         final marginPaint = Paint()
-          ..color = Colors.red.withOpacity(0.3)
-          ..strokeWidth = 1.0;
+          ..color = isOverlay ? Colors.red.withOpacity(0.6) : Colors.red.withOpacity(0.3)
+          ..strokeWidth = isOverlay ? 1.5 : 1.0;
         canvas.drawLine(Offset(marginLeft, 0), Offset(marginLeft, size.height), marginPaint);
 
         // Draw horizontal lines
@@ -4081,29 +4163,30 @@ class _TemplatePainter extends CustomPainter {
         break;
 
       case PageTemplate.dotted:
-        // Dot grid
+        // Dot grid - 오버레이일 때 더 진하고 크게
         const dotSpacing = 25.0;
         final dotPaint = Paint()
-          ..color = Colors.grey.withOpacity(0.4)
-          ..strokeWidth = 2.0
+          ..color = isOverlay ? Colors.grey.withOpacity(0.7) : Colors.grey.withOpacity(0.4)
+          ..strokeWidth = isOverlay ? 3.0 : 2.0
           ..strokeCap = StrokeCap.round;
 
+        final dotRadius = isOverlay ? 1.5 : 1.0;
         for (double x = dotSpacing; x < size.width; x += dotSpacing) {
           for (double y = dotSpacing; y < size.height; y += dotSpacing) {
-            canvas.drawCircle(Offset(x, y), 1.0, dotPaint);
+            canvas.drawCircle(Offset(x, y), dotRadius, dotPaint);
           }
         }
         break;
 
       case PageTemplate.cornell:
-        // Cornell note-taking format
+        // Cornell note-taking format - 오버레이일 때 더 강하게
         const cueColumnWidth = 150.0;
         const summaryHeight = 120.0;
         const lineSpacing = 30.0;
 
         final sectionPaint = Paint()
-          ..color = Colors.blue.withOpacity(0.3)
-          ..strokeWidth = 2.0;
+          ..color = isOverlay ? Colors.blue.withOpacity(0.6) : Colors.blue.withOpacity(0.3)
+          ..strokeWidth = isOverlay ? 3.0 : 2.0;
 
         // Vertical line for cue column
         canvas.drawLine(
@@ -4128,7 +4211,8 @@ class _TemplatePainter extends CustomPainter {
           );
         }
 
-        // Labels
+        // Labels - 오버레이일 때 더 진하게
+        final labelOpacity = isOverlay ? 0.7 : 0.4;
         final textPainter = TextPainter(
           textDirection: TextDirection.ltr,
         );
@@ -4137,7 +4221,7 @@ class _TemplatePainter extends CustomPainter {
         textPainter.text = TextSpan(
           text: 'CUE',
           style: TextStyle(
-            color: Colors.blue.withOpacity(0.4),
+            color: Colors.blue.withOpacity(labelOpacity),
             fontSize: 12,
             fontWeight: FontWeight.bold,
           ),
@@ -4149,7 +4233,7 @@ class _TemplatePainter extends CustomPainter {
         textPainter.text = TextSpan(
           text: 'NOTES',
           style: TextStyle(
-            color: Colors.blue.withOpacity(0.4),
+            color: Colors.blue.withOpacity(labelOpacity),
             fontSize: 12,
             fontWeight: FontWeight.bold,
           ),
@@ -4161,7 +4245,7 @@ class _TemplatePainter extends CustomPainter {
         textPainter.text = TextSpan(
           text: 'SUMMARY',
           style: TextStyle(
-            color: Colors.blue.withOpacity(0.4),
+            color: Colors.blue.withOpacity(labelOpacity),
             fontSize: 12,
             fontWeight: FontWeight.bold,
           ),
@@ -4169,12 +4253,17 @@ class _TemplatePainter extends CustomPainter {
         textPainter.layout();
         textPainter.paint(canvas, Offset(10, size.height - summaryHeight + 10));
         break;
+
+      case PageTemplate.customImage:
+        // 커스텀 이미지 배경은 별도 위젯에서 렌더링
+        // _TemplatePainter에서는 아무것도 그리지 않음
+        break;
     }
   }
 
   @override
   bool shouldRepaint(covariant _TemplatePainter oldDelegate) =>
-      template != oldDelegate.template;
+      template != oldDelegate.template || isOverlay != oldDelegate.isOverlay;
 }
 
 /// Optimized stroke renderer - draws directly without spline interpolation for performance
@@ -4706,6 +4795,10 @@ class _TablePainter extends CustomPainter {
   final int resizeWaitingRowIndex; // 리사이즈 대기 중인 행 인덱스 (-1=없음)
   final bool isResizeActive; // 리사이즈 활성화 상태 (롱프레스 완료)
 
+  // 성능 최적화: TextPainter 캐시 (tableId:row:col -> TextPainter)
+  static final Map<String, TextPainter> _textPainterCache = {};
+  static const int _maxCacheSize = 500;
+
   _TablePainter({
     required this.tables,
     this.selectedTableId,
@@ -4715,6 +4808,37 @@ class _TablePainter extends CustomPainter {
     this.resizeWaitingRowIndex = -1,
     this.isResizeActive = false,
   });
+
+  /// 캐시된 TextPainter 가져오기 또는 생성
+  TextPainter _getCachedTextPainter(String cacheKey, String content, Color color, double maxWidth) {
+    final cached = _textPainterCache[cacheKey];
+    if (cached != null) {
+      return cached;
+    }
+
+    // 캐시 크기 제한
+    if (_textPainterCache.length >= _maxCacheSize) {
+      // 절반 제거 (LRU 대신 간단한 방식)
+      final keysToRemove = _textPainterCache.keys.take(_maxCacheSize ~/ 2).toList();
+      for (final key in keysToRemove) {
+        _textPainterCache.remove(key);
+      }
+    }
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: content,
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout(maxWidth: maxWidth);
+    _textPainterCache[cacheKey] = textPainter;
+    return textPainter;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -4751,23 +4875,20 @@ class _TablePainter extends CustomPainter {
         );
       }
 
-      // Draw cell contents
+      // Draw cell contents (성능 최적화: TextPainter 캐시 사용)
       for (int row = 0; row < table.rows; row++) {
         for (int col = 0; col < table.columns; col++) {
           final content = table.cellContents[row][col];
           if (content.isNotEmpty) {
             final cellBounds = table.getCellBounds(row, col);
-            final textPainter = TextPainter(
-              text: TextSpan(
-                text: content,
-                style: TextStyle(
-                  color: table.borderColor,
-                  fontSize: 12,
-                ),
-              ),
-              textDirection: TextDirection.ltr,
+            // 캐시 키: tableId:row:col:content:color:width
+            final cacheKey = '${table.id}:$row:$col:$content:${table.borderColor.value}:${cellBounds.width.toInt()}';
+            final textPainter = _getCachedTextPainter(
+              cacheKey,
+              content,
+              table.borderColor,
+              cellBounds.width - 4,
             );
-            textPainter.layout(maxWidth: cellBounds.width - 4);
             textPainter.paint(
               canvas,
               Offset(cellBounds.left + 2, cellBounds.top + 2),
@@ -4983,6 +5104,7 @@ class _TablePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _TablePainter oldDelegate) {
+    // 성능 최적화: 빠른 체크 먼저 수행
     if (tables.length != oldDelegate.tables.length) return true;
     if (selectedTableId != oldDelegate.selectedTableId) return true;
     if (readyToDragId != oldDelegate.readyToDragId) return true;
@@ -4990,20 +5112,35 @@ class _TablePainter extends CustomPainter {
     if (resizeWaitingColumnIndex != oldDelegate.resizeWaitingColumnIndex) return true;
     if (resizeWaitingRowIndex != oldDelegate.resizeWaitingRowIndex) return true;
     if (isResizeActive != oldDelegate.isResizeActive) return true;
-    // 표 위치/크기/열폭/행높이 변경 감지
+
+    // 성능 최적화: identical 체크로 대부분의 경우 빠르게 반환
+    if (identical(tables, oldDelegate.tables)) return false;
+
+    // 표 변경 감지 (위치/크기/구조만 체크, 개별 열/행 순회 최소화)
     for (int i = 0; i < tables.length; i++) {
       final table = tables[i];
       final oldTable = oldDelegate.tables[i];
+
+      // 기본 속성 비교 (O(1))
+      if (table.id != oldTable.id) return true;
       if (table.position != oldTable.position) return true;
       if (table.rows != oldTable.rows) return true;
       if (table.columns != oldTable.columns) return true;
-      // 열 폭 변경 감지
-      for (int c = 0; c < table.columns; c++) {
-        if (table.getColumnWidth(c) != oldTable.getColumnWidth(c)) return true;
-      }
-      // 행 높이 변경 감지
-      for (int r = 0; r < table.rows; r++) {
-        if (table.getRowHeight(r) != oldTable.getRowHeight(r)) return true;
+
+      // 성능 최적화: 전체 크기 비교로 대부분의 변경 감지
+      if (table.width != oldTable.width) return true;
+      if (table.height != oldTable.height) return true;
+
+      // 셀 내용 변경 감지 (identical 먼저 체크)
+      if (!identical(table.cellContents, oldTable.cellContents)) {
+        // cellContents가 다른 인스턴스면 내용 비교
+        for (int r = 0; r < table.rows; r++) {
+          for (int c = 0; c < table.columns; c++) {
+            if (table.cellContents[r][c] != oldTable.cellContents[r][c]) {
+              return true;
+            }
+          }
+        }
       }
     }
     return false;
@@ -5080,4 +5217,86 @@ class _TextPainter extends CustomPainter {
     }
     return false;
   }
+}
+
+/// 커스텀 배경 이미지 위젯
+/// 전체 캔버스 크기에 맞게 이미지를 렌더링
+class _BackgroundImageWidget extends StatelessWidget {
+  final String imagePath;
+  final ui.Image? loadedImage;
+
+  const _BackgroundImageWidget({
+    required this.imagePath,
+    this.loadedImage,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (loadedImage == null) {
+      // 이미지 로딩 중 - 로딩 인디케이터 또는 빈 컨테이너
+      return const SizedBox.expand(
+        child: Center(
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+
+    return CustomPaint(
+      painter: _BackgroundImagePainter(image: loadedImage!),
+      size: Size.infinite,
+    );
+  }
+}
+
+/// 배경 이미지 페인터
+/// 캔버스 전체에 이미지를 채워서 렌더링 (cover 모드 - 전체 채움)
+class _BackgroundImagePainter extends CustomPainter {
+  final ui.Image image;
+
+  _BackgroundImagePainter({required this.image});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 배경을 흰색으로 채움 (투명 이미지 대비)
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Paint()..color = Colors.white,
+    );
+
+    // cover 모드: 이미지가 캔버스 전체를 채우도록 (비율 유지, 잘릴 수 있음)
+    final imageAspect = image.width / image.height;
+    final canvasAspect = size.width / size.height;
+
+    double srcWidth, srcHeight;
+    double srcOffsetX = 0, srcOffsetY = 0;
+
+    if (imageAspect > canvasAspect) {
+      // 이미지가 더 넓음 - 세로에 맞추고 가로 중앙 잘라냄
+      srcHeight = image.height.toDouble();
+      srcWidth = srcHeight * canvasAspect;
+      srcOffsetX = (image.width - srcWidth) / 2;
+    } else {
+      // 이미지가 더 높음 - 가로에 맞추고 세로 중앙 잘라냄
+      srcWidth = image.width.toDouble();
+      srcHeight = srcWidth / canvasAspect;
+      srcOffsetY = (image.height - srcHeight) / 2;
+    }
+
+    final srcRect = Rect.fromLTWH(srcOffsetX, srcOffsetY, srcWidth, srcHeight);
+    final destRect = Rect.fromLTWH(0, 0, size.width, size.height);
+
+    // 15% 투명도로 배경 이미지 렌더링 (필기가 더 잘 보이도록)
+    final paint = Paint()
+      ..colorFilter = const ColorFilter.matrix(<double>[
+        1, 0, 0, 0, 0,    // R
+        0, 1, 0, 0, 0,    // G
+        0, 0, 1, 0, 0,    // B
+        0, 0, 0, 0.15, 0, // A (15% 투명도)
+      ]);
+    canvas.drawImageRect(image, srcRect, destRect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _BackgroundImagePainter oldDelegate) =>
+      image != oldDelegate.image;
 }

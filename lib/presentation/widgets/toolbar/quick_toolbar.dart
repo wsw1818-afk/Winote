@@ -30,6 +30,11 @@ class QuickToolbar extends StatefulWidget {
   final VoidCallback? onInsertImage;
   final VoidCallback? onInsertText;
   final VoidCallback? onInsertTable;
+  // Background image callbacks (커스텀 배경 이미지)
+  final VoidCallback? onSelectBackgroundImage;
+  final VoidCallback? onClearBackgroundImage;
+  final bool hasBackgroundImage;
+  final PageTemplate? overlayTemplate; // 배경 이미지 위에 표시되는 템플릿
   // Laser pointer color
   final Color laserPointerColor;
   final void Function(Color)? onLaserPointerColorChanged;
@@ -65,6 +70,10 @@ class QuickToolbar extends StatefulWidget {
     this.onInsertImage,
     this.onInsertText,
     this.onInsertTable,
+    this.onSelectBackgroundImage,
+    this.onClearBackgroundImage,
+    this.hasBackgroundImage = false,
+    this.overlayTemplate,
     this.laserPointerColor = Colors.red,
     this.onLaserPointerColorChanged,
     this.presentationHighlighterFadeEnabled = true,
@@ -75,7 +84,7 @@ class QuickToolbar extends StatefulWidget {
   // Preset widths for pen (다양한 크기 프리셋)
   static const List<double> penWidthPresets = [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0];
   // Preset widths for eraser
-  static const List<double> eraserWidths = [10.0, 20.0, 40.0, 60.0];
+  static const List<double> eraserWidths = [10.0, 20.0, 40.0, 60.0, 80.0, 150.0];
   // Preset widths for highlighter (더 두꺼운 크기)
   static const List<double> highlighterWidthPresets = [10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0];
   // Preset opacities for highlighter (투명도 프리셋)
@@ -127,6 +136,37 @@ class _QuickToolbarState extends State<QuickToolbar> {
   void _closeOverlay() {
     _currentOverlay?.remove();
     _currentOverlay = null;
+  }
+
+  /// 성능 최적화: 공통 Overlay 표시 헬퍼 메소드
+  /// RenderBox 계산 로직 통합
+  Offset? _getButtonPosition(BuildContext context) {
+    final renderObject = context.findRenderObject();
+    if (renderObject == null || renderObject is! RenderBox) return null;
+
+    final overlayContext = Overlay.of(context).context;
+    final overlayRenderObject = overlayContext.findRenderObject();
+    if (overlayRenderObject == null || overlayRenderObject is! RenderBox) return null;
+
+    return renderObject.localToGlobal(Offset.zero, ancestor: overlayRenderObject);
+  }
+
+  /// 공통 Overlay 생성 및 표시
+  void _showPanelOverlay(BuildContext context, OverlayEntry Function(Offset position) builder) {
+    // 이미 열려있으면 닫기
+    if (_currentOverlay != null) {
+      _closeOverlay();
+      return;
+    }
+
+    final position = _getButtonPosition(context);
+    if (position == null) return;
+
+    _currentOverlay = builder(position);
+    Overlay.of(context).insert(_currentOverlay!);
+
+    // 부모에게 패널이 열렸음을 알리고 닫기 콜백 전달
+    widget.onPanelOpened?.call(_closeOverlay);
   }
 
   // 기본 프리셋 색상 (초기값, 설정 로드 전) - 14개 확장
@@ -349,8 +389,14 @@ class _QuickToolbarState extends State<QuickToolbar> {
   }
 
   Widget _buildTemplateButton(BuildContext context) {
+    // 배경 이미지가 있을 때는 overlayTemplate 아이콘 표시, 없으면 currentTemplate 표시
+    final displayTemplate = widget.hasBackgroundImage
+        ? (widget.overlayTemplate ?? PageTemplate.blank) // 오버레이 없으면 빈 페이지 아이콘
+        : widget.currentTemplate;
+    final hasOverlay = widget.hasBackgroundImage && widget.overlayTemplate != null;
+
     return Tooltip(
-      message: '페이지 템플릿',
+      message: widget.hasBackgroundImage ? '오버레이 템플릿 (배경 이미지 위에 표시)' : '페이지 템플릿',
       child: PopupMenuButton<PageTemplate>(
         tooltip: '', // 기본 "Show menu" 툴팁 비활성화
         onSelected: widget.onTemplateChanged,
@@ -358,20 +404,29 @@ class _QuickToolbarState extends State<QuickToolbar> {
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: Colors.blue.withOpacity(0.1),
+            color: hasOverlay ? Colors.green.withOpacity(0.1) : Colors.blue.withOpacity(0.1),
             borderRadius: BorderRadius.circular(6),
+            border: widget.hasBackgroundImage
+                ? Border.all(color: hasOverlay ? Colors.green : Colors.orange, width: 1.5)
+                : null,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(_getTemplateIcon(widget.currentTemplate), size: 20, color: Colors.blue),
+              if (widget.hasBackgroundImage) ...[
+                const Icon(Icons.wallpaper, size: 14, color: Colors.orange),
+                const SizedBox(width: 2),
+                const Text('+', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(width: 2),
+              ],
+              Icon(_getTemplateIcon(displayTemplate), size: 20, color: hasOverlay ? Colors.green : Colors.blue),
               const SizedBox(width: 4),
               const Icon(Icons.arrow_drop_up, size: 16, color: Colors.blue),
             ],
           ),
         ),
         itemBuilder: (context) => [
-          _buildTemplateMenuItem(PageTemplate.blank, Icons.crop_square, '빈 페이지'),
+          _buildTemplateMenuItem(PageTemplate.blank, Icons.crop_square, widget.hasBackgroundImage ? '오버레이 없음' : '빈 페이지'),
           _buildTemplateMenuItem(PageTemplate.lined, Icons.view_headline, '줄 노트'),
           _buildTemplateMenuItem(PageTemplate.grid, Icons.grid_4x4, '격자 노트'),
           _buildTemplateMenuItem(PageTemplate.dotted, Icons.more_horiz, '점 노트'),
@@ -396,6 +451,12 @@ class _QuickToolbarState extends State<QuickToolbar> {
               break;
             case 'table':
               widget.onInsertTable?.call();
+              break;
+            case 'background':
+              widget.onSelectBackgroundImage?.call();
+              break;
+            case 'clear_background':
+              widget.onClearBackgroundImage?.call();
               break;
           }
         },
@@ -446,6 +507,28 @@ class _QuickToolbarState extends State<QuickToolbar> {
               ],
             ),
           ),
+          const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: 'background',
+            child: Row(
+              children: [
+                Icon(Icons.wallpaper, size: 20, color: Colors.deepPurple),
+                SizedBox(width: 12),
+                Text('배경 이미지 (Canva 템플릿)'),
+              ],
+            ),
+          ),
+          if (widget.hasBackgroundImage)
+            const PopupMenuItem(
+              value: 'clear_background',
+              child: Row(
+                children: [
+                  Icon(Icons.wallpaper_outlined, size: 20, color: Colors.grey),
+                  SizedBox(width: 12),
+                  Text('배경 이미지 제거'),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -491,6 +574,8 @@ class _QuickToolbarState extends State<QuickToolbar> {
         return Icons.more_horiz;
       case PageTemplate.cornell:
         return Icons.view_quilt;
+      case PageTemplate.customImage:
+        return Icons.wallpaper;
     }
   }
 
@@ -581,20 +666,9 @@ class _QuickToolbarState extends State<QuickToolbar> {
 
   /// 펜 설정 패널 표시 (Overlay 방식 - 캔버스 터치 허용)
   void _showPenPanel(BuildContext context) {
-    // 이미 열려있으면 닫기
-    if (_currentOverlay != null) {
-      _closeOverlay();
-      return;
-    }
-
-    final RenderBox button = context.findRenderObject() as RenderBox;
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final buttonPosition = button.localToGlobal(Offset.zero, ancestor: overlay);
-
-    // Overlay로 패널 표시 (터치 이벤트가 캔버스에 전달됨)
-    _currentOverlay = OverlayEntry(
-      builder: (context) => _PenPanelOverlay(
-        buttonPosition: buttonPosition,
+    _showPanelOverlay(context, (position) => OverlayEntry(
+      builder: (_) => _PenPanelOverlay(
+        buttonPosition: position,
         currentColor: widget.currentColor,
         currentWidth: widget.currentWidth,
         onColorChanged: widget.onColorChanged,
@@ -602,12 +676,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         onClose: _closeOverlay,
         defaultColors: _defaultColors,
       ),
-    );
-
-    Overlay.of(context).insert(_currentOverlay!);
-
-    // 부모에게 패널이 열렸음을 알리고 닫기 콜백 전달
-    widget.onPanelOpened?.call(_closeOverlay);
+    ));
   }
 
   /// 형광펜 도구 버튼 (색상 + 굵기 + 투명도 가로 패널)
@@ -672,20 +741,9 @@ class _QuickToolbarState extends State<QuickToolbar> {
 
   /// 형광펜 설정 패널 표시 (Overlay 방식 - 캔버스 터치 허용)
   void _showHighlighterPanel(BuildContext context) {
-    // 이미 열려있으면 닫기
-    if (_currentOverlay != null) {
-      _closeOverlay();
-      return;
-    }
-
-    final RenderBox button = context.findRenderObject() as RenderBox;
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final buttonPosition = button.localToGlobal(Offset.zero, ancestor: overlay);
-
-    // Overlay로 패널 표시 (터치 이벤트가 캔버스에 전달됨)
-    _currentOverlay = OverlayEntry(
-      builder: (context) => _HighlighterPanelOverlay(
-        buttonPosition: buttonPosition,
+    _showPanelOverlay(context, (position) => OverlayEntry(
+      builder: (_) => _HighlighterPanelOverlay(
+        buttonPosition: position,
         currentColor: widget.highlighterColor,
         currentWidth: widget.highlighterWidth,
         currentOpacity: widget.highlighterOpacity,
@@ -694,12 +752,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         onOpacityChanged: widget.onHighlighterOpacityChanged,
         onClose: _closeOverlay,
       ),
-    );
-
-    Overlay.of(context).insert(_currentOverlay!);
-
-    // 부모에게 패널이 열렸음을 알리고 닫기 콜백 전달
-    widget.onPanelOpened?.call(_closeOverlay);
+    ));
   }
 
   /// 지우개 도구 버튼 (굵기 가로 패널)
@@ -758,30 +811,14 @@ class _QuickToolbarState extends State<QuickToolbar> {
 
   /// 지우개 설정 패널 표시 (Overlay 방식 - 캔버스 터치 허용)
   void _showEraserPanel(BuildContext context) {
-    // 이미 열려있으면 닫기
-    if (_currentOverlay != null) {
-      _closeOverlay();
-      return;
-    }
-
-    final RenderBox button = context.findRenderObject() as RenderBox;
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final buttonPosition = button.localToGlobal(Offset.zero, ancestor: overlay);
-
-    // Overlay로 패널 표시 (터치 이벤트가 캔버스에 전달됨)
-    _currentOverlay = OverlayEntry(
-      builder: (context) => _EraserPanelOverlay(
-        buttonPosition: buttonPosition,
+    _showPanelOverlay(context, (position) => OverlayEntry(
+      builder: (_) => _EraserPanelOverlay(
+        buttonPosition: position,
         currentWidth: widget.eraserWidth,
         onWidthChanged: widget.onEraserWidthChanged,
         onClose: _closeOverlay,
       ),
-    );
-
-    Overlay.of(context).insert(_currentOverlay!);
-
-    // 부모에게 패널이 열렸음을 알리고 닫기 콜백 전달
-    widget.onPanelOpened?.call(_closeOverlay);
+    ));
   }
 
   Widget _buildShapeToolButton(BuildContext context) {

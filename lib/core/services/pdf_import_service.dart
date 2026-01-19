@@ -1,12 +1,8 @@
 import 'dart:io';
-import 'dart:ui' as ui;
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import 'package:file_picker/file_picker.dart';
 import '../services/note_storage_service.dart';
-import '../../domain/entities/stroke.dart';
 import '../../domain/entities/canvas_shape.dart';
 
 /// PDF 페이지 정보

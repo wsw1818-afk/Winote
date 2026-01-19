@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../domain/entities/stroke.dart';
+import '../../domain/entities/stroke_point.dart';
 
 /// 녹음 상태
 enum RecordingState {
@@ -31,7 +32,7 @@ class TimestampedStroke {
 
   factory TimestampedStroke.fromJson(Map<String, dynamic> json) {
     return TimestampedStroke(
-      stroke: Stroke.fromJson(json['stroke'] as Map<String, dynamic>),
+      stroke: strokeFromJson(json['stroke'] as Map<String, dynamic>),
       recordingStartTime: json['recordingStartTime'] as int,
       recordingEndTime: json['recordingEndTime'] as int,
     );
@@ -400,43 +401,27 @@ extension StrokeJson on Stroke {
       'shapeType': shapeType.index,
     };
   }
-
-  static Stroke fromJson(Map<String, dynamic> json) {
-    return Stroke(
-      id: json['id'] as String,
-      toolType: ToolType.values[json['toolType'] as int],
-      color: Color(json['color'] as int),
-      width: (json['width'] as num).toDouble(),
-      points: (json['points'] as List<dynamic>).map((p) {
-        final map = p as Map<String, dynamic>;
-        return StrokePoint(
-          x: (map['x'] as num).toDouble(),
-          y: (map['y'] as num).toDouble(),
-          pressure: (map['pressure'] as num).toDouble(),
-          tilt: (map['tilt'] as num).toDouble(),
-          timestamp: map['timestamp'] as int,
-        );
-      }).toList(),
-      timestamp: json['timestamp'] as int,
-      isShape: json['isShape'] as bool? ?? false,
-      shapeType: ShapeType.values[json['shapeType'] as int? ?? 0],
-    );
-  }
 }
 
-// stroke_point.dart에서 가져와야 하지만, 여기서는 간단히 정의
-class StrokePoint {
-  final double x;
-  final double y;
-  final double pressure;
-  final double tilt;
-  final int timestamp;
-
-  const StrokePoint({
-    required this.x,
-    required this.y,
-    required this.pressure,
-    required this.tilt,
-    required this.timestamp,
-  });
+/// JSON에서 Stroke 생성 (extension 외부에서 호출 가능)
+Stroke strokeFromJson(Map<String, dynamic> json) {
+  return Stroke(
+    id: json['id'] as String,
+    toolType: ToolType.values[json['toolType'] as int],
+    color: Color(json['color'] as int),
+    width: (json['width'] as num).toDouble(),
+    points: (json['points'] as List<dynamic>).map((p) {
+      final map = p as Map<String, dynamic>;
+      return StrokePoint(
+        x: (map['x'] as num).toDouble(),
+        y: (map['y'] as num).toDouble(),
+        pressure: (map['pressure'] as num).toDouble(),
+        tilt: (map['tilt'] as num).toDouble(),
+        timestamp: map['timestamp'] as int,
+      );
+    }).toList(),
+    timestamp: json['timestamp'] as int,
+    isShape: json['isShape'] as bool? ?? false,
+    shapeType: ShapeType.values[json['shapeType'] as int? ?? 0],
+  );
 }
