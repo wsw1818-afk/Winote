@@ -9,7 +9,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 import '../../../domain/entities/stroke.dart';
-import '../../../domain/entities/stroke_point.dart';
 import '../../../domain/entities/canvas_shape.dart';
 import '../../../domain/entities/canvas_table.dart';
 import '../../../core/providers/drawing_state.dart';
@@ -44,17 +43,25 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   // Note state
   Note? _currentNote;
   bool _isLoading = true;
-  bool _hasChanges = false;
 
   // Page state
   int _currentPageIndex = 0;
 
   // Drawing tool state
   DrawingTool _currentTool = DrawingTool.pen;
-  Color _currentColor = Colors.black;
-  double _currentWidth = 2.0;
+
+  // 펜 설정 (별도 저장)
+  Color _penColor = Colors.black;
+  double _penWidth = 2.0;
+
+  // 형광펜 설정 (별도 저장)
+  Color _highlighterColor = const Color(0xFFFFEB3B); // 노랑
+  double _highlighterWidth = 20.0;
+  double _highlighterOpacity = 0.4;
+
+  // 지우개 설정
   double _eraserWidth = 20.0;
-  double _highlighterOpacity = 0.4; // 형광펜 투명도
+
   PageTemplate _currentTemplate = PageTemplate.grid;
 
   // Stroke smoothing
@@ -69,9 +76,13 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   // Presentation highlighter fade mode
   bool _presentationHighlighterFadeEnabled = true;
 
-  // Track undo/redo state
-  bool _canUndo = false;
-  bool _canRedo = false;
+  // Track undo/redo state - ValueNotifier로 불필요한 rebuild 방지
+  final ValueNotifier<bool> _canUndoNotifier = ValueNotifier(false);
+  final ValueNotifier<bool> _canRedoNotifier = ValueNotifier(false);
+
+  // 변경 상태 추적 - setState 호출 최소화
+  bool _hasChanges = false;
+  bool _pendingHasChangesUpdate = false;
 
   // Auto-save
   Timer? _autoSaveTimer;
@@ -83,6 +94,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   // Debug overlay (from settings)
   bool _showDebugOverlay = false;
+
+  // 패널 닫기 콜백 (캔버스 터치 시 패널 닫기 위해)
+  VoidCallback? _closePanelCallback;
 
   /// 현재 페이지의 PDF 배경 정보 가져오기
   CanvasShape? _getCurrentPagePdfBackground() {
@@ -108,6 +122,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   @override
   void dispose() {
     _autoSaveTimer?.cancel();
+    _canUndoNotifier.dispose();
+    _canRedoNotifier.dispose();
     super.dispose();
   }
 
@@ -115,11 +131,43 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     final settings = SettingsService.instance;
     _autoSaveEnabled = settings.autoSaveEnabled;
     _autoSaveDelay = settings.autoSaveDelay;
-    _currentWidth = settings.defaultPenWidth;
+    _penWidth = settings.defaultPenWidth;
     _eraserWidth = settings.defaultEraserWidth;
     _currentTemplate = settings.defaultTemplate;
     _lassoColor = settings.lassoColor;
     _showDebugOverlay = settings.showDebugOverlay;
+  }
+
+  /// 현재 도구에 맞는 색상 반환
+  Color get _currentColor {
+    switch (_currentTool) {
+      case DrawingTool.pen:
+      case DrawingTool.shapeLine:
+      case DrawingTool.shapeRectangle:
+      case DrawingTool.shapeCircle:
+      case DrawingTool.shapeArrow:
+        return _penColor;
+      case DrawingTool.highlighter:
+        return _highlighterColor;
+      default:
+        return _penColor;
+    }
+  }
+
+  /// 현재 도구에 맞는 굵기 반환
+  double get _currentWidth {
+    switch (_currentTool) {
+      case DrawingTool.pen:
+      case DrawingTool.shapeLine:
+      case DrawingTool.shapeRectangle:
+      case DrawingTool.shapeCircle:
+      case DrawingTool.shapeArrow:
+        return _penWidth;
+      case DrawingTool.highlighter:
+        return _highlighterWidth;
+      default:
+        return _penWidth;
+    }
   }
 
   void _scheduleAutoSave() {
@@ -129,6 +177,20 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     _autoSaveTimer = Timer(Duration(seconds: _autoSaveDelay), () {
       if (_hasChanges && _currentNote != null) {
         _autoSave();
+      }
+    });
+  }
+
+  /// 변경 상태 UI 업데이트를 지연시켜 불필요한 rebuild 방지
+  void _scheduleHasChangesUpdate() {
+    if (_pendingHasChangesUpdate) return;
+    _pendingHasChangesUpdate = true;
+
+    // 다음 프레임에서 한 번만 setState 호출
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _pendingHasChangesUpdate) {
+        _pendingHasChangesUpdate = false;
+        setState(() {}); // AppBar 타이틀의 * 표시 업데이트
       }
     });
   }
@@ -265,8 +327,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           // Toolbar (전역 설정: 실행취소/다시실행, 색상, 전체삭제)
           DrawingToolbar(
             currentColor: _currentColor,
-            canUndo: _canUndo,
-            canRedo: _canRedo,
+            canUndoNotifier: _canUndoNotifier,
+            canRedoNotifier: _canRedoNotifier,
             onUndo: () {
               _canvasKey.currentState?.undo();
               _updateUndoRedoState();
@@ -277,7 +339,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
             },
             onClear: _showClearConfirmDialog,
             onColorChanged: (color) {
-              setState(() => _currentColor = color);
+              setState(() {
+                // DrawingToolbar는 펜 색상만 변경 (형광펜은 QuickToolbar에서 변경)
+                _penColor = color;
+              });
             },
           ),
           // Canvas - A4 비율로 화면 가득 채움
@@ -309,15 +374,19 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                             initialShapes: _currentNote?.getShapesForPage(_currentPageIndex),
                             onStrokesChanged: (strokes) {
                               _updateUndoRedoState();
+                              // setState 없이 내부 상태만 변경 (AppBar 타이틀에 * 표시 필요시에만 rebuild)
                               if (!_hasChanges) {
-                                setState(() => _hasChanges = true);
+                                _hasChanges = true;
+                                // 타이틀 업데이트가 필요하면 지연된 단일 setState
+                                _scheduleHasChangesUpdate();
                               }
                               _scheduleAutoSave();
                             },
                             onShapesChanged: (shapes) {
                               _updateUndoRedoState();
                               if (!_hasChanges) {
-                                setState(() => _hasChanges = true);
+                                _hasChanges = true;
+                                _scheduleHasChangesUpdate();
                               }
                               _scheduleAutoSave();
                             },
@@ -325,6 +394,13 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                               setState(() {
                                 _showImageEditToolbar = hasSelection;
                               });
+                            },
+                            onCanvasTouchStart: () {
+                              // 캔버스 터치 시 열린 패널 닫기
+                              if (_closePanelCallback != null) {
+                                _closePanelCallback!();
+                                _closePanelCallback = null;
+                              }
                             },
                     ),
                   ),
@@ -337,8 +413,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                     child: Center(
                       child: QuickToolbar(
                         currentTool: _currentTool,
-                        currentColor: _currentColor,
-                        currentWidth: _currentWidth,
+                        currentColor: _penColor, // 펜 전용 색상
+                        highlighterColor: _highlighterColor, // 형광펜 전용 색상
+                        currentWidth: _penWidth, // 펜 전용 굵기
+                        highlighterWidth: _highlighterWidth, // 형광펜 전용 굵기
                         eraserWidth: _eraserWidth,
                         highlighterOpacity: _highlighterOpacity,
                         currentTemplate: _currentTemplate,
@@ -351,10 +429,20 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                           }
                         },
                         onColorChanged: (color) {
-                          setState(() => _currentColor = color);
+                          // 펜 색상 변경
+                          setState(() => _penColor = color);
+                        },
+                        onHighlighterColorChanged: (color) {
+                          // 형광펜 색상 변경
+                          setState(() => _highlighterColor = color);
                         },
                         onWidthChanged: (width) {
-                          setState(() => _currentWidth = width);
+                          // 펜 굵기 변경
+                          setState(() => _penWidth = width);
+                        },
+                        onHighlighterWidthChanged: (width) {
+                          // 형광펜 굵기 변경
+                          setState(() => _highlighterWidth = width);
                         },
                         onEraserWidthChanged: (width) {
                           setState(() => _eraserWidth = width);
@@ -390,6 +478,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
                         onPresentationHighlighterFadeChanged: (enabled) {
                           setState(() => _presentationHighlighterFadeEnabled = enabled);
+                        },
+                        onPanelOpened: (closeCallback) {
+                          // 패널이 열릴 때 닫기 콜백 저장 (캔버스에서 호출)
+                          _closePanelCallback = closeCallback;
                         },
                       ),
                     ),
@@ -823,10 +915,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   void _updateUndoRedoState() {
     final canvasState = _canvasKey.currentState;
     if (canvasState != null) {
-      setState(() {
-        _canUndo = canvasState.canUndo;
-        _canRedo = canvasState.canRedo;
-      });
+      // ValueNotifier 사용으로 setState 없이 undo/redo 버튼만 업데이트
+      _canUndoNotifier.value = canvasState.canUndo;
+      _canRedoNotifier.value = canvasState.canRedo;
     }
   }
 

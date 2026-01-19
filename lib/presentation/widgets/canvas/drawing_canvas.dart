@@ -47,6 +47,8 @@ class DrawingCanvas extends StatefulWidget {
   final void Function(bool hasSelection)? onTableSelectionChanged;
   final void Function(double scale, Offset offset)? onTransformChanged;
   final bool presentationHighlighterFadeEnabled;
+  // 패널 닫기 콜백 (캔버스 터치 시 패널 닫기)
+  final VoidCallback? onCanvasTouchStart;
 
   const DrawingCanvas({
     super.key,
@@ -79,6 +81,7 @@ class DrawingCanvas extends StatefulWidget {
     this.onTableSelectionChanged,
     this.onTransformChanged,
     this.presentationHighlighterFadeEnabled = true,
+    this.onCanvasTouchStart,
   });
 
   @override
@@ -364,11 +367,27 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     }
   }
 
-  /// Load all images from file paths
+  /// Load all images from file paths (병렬 로드로 성능 최적화)
   Future<void> _loadAllImages() async {
-    for (final canvasImage in _images) {
-      await _loadImage(canvasImage.imagePath);
+    if (_images.isEmpty) return;
+
+    // 이미 로드된 이미지는 제외
+    final imagesToLoad = _images
+        .where((img) => !_loadedImages.containsKey(img.imagePath))
+        .toList();
+
+    if (imagesToLoad.isEmpty) return;
+
+    // 병렬 로드 (최대 5개씩 동시 로드하여 메모리 관리)
+    const batchSize = 5;
+    for (var i = 0; i < imagesToLoad.length; i += batchSize) {
+      final batch = imagesToLoad.skip(i).take(batchSize);
+      await Future.wait(
+        batch.map((img) => _loadImage(img.imagePath)),
+        eagerError: false, // 에러 발생해도 다른 이미지 계속 로드
+      );
     }
+
     if (mounted) setState(() {});
   }
 
@@ -542,9 +561,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                     painter: _TemplatePainter(template: widget.pageTemplate),
                     size: Size.infinite,
                   ),
-                  // Images layer (key 단순화: 개수 + 선택 상태만)
+                  // Images layer - Key 최적화: 개수만으로 Key 결정 (선택 상태는 shouldRepaint로 처리)
                   RepaintBoundary(
-                    key: ValueKey('images_${_images.length}_$_selectedImageId'),
+                    key: ValueKey('images_${_images.length}'),
                     child: CustomPaint(
                       painter: _ImagePainter(
                         images: _images,
@@ -554,9 +573,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                       size: Size.infinite,
                     ),
                   ),
-                  // Shapes layer (key 단순화)
+                  // Shapes layer - Key 최적화: 개수만으로 Key 결정
                   RepaintBoundary(
-                    key: ValueKey('shapes_${_shapes.length}_$_selectedShapeId'),
+                    key: ValueKey('shapes_${_shapes.length}'),
                     child: CustomPaint(
                       painter: _ShapePainter(
                         shapes: _shapes,
@@ -579,9 +598,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                     ),
                     size: Size.infinite,
                   ),
-                  // Text layer (key 단순화)
+                  // Text layer - Key 최적화: 개수만으로 Key 결정
                   RepaintBoundary(
-                    key: ValueKey('texts_${_texts.length}_$_selectedTextId'),
+                    key: ValueKey('texts_${_texts.length}'),
                     child: CustomPaint(
                       painter: _TextPainter(
                         texts: _texts,
@@ -591,9 +610,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                     ),
                   ),
                   // Drawing area with RepaintBoundary for performance
-                  // 지우개 사용 시에는 RepaintBoundary 비활성화하여 커서가 부드럽게 따라오도록 함
+                  // Key 최적화: 지우개 위치는 Key에서 제외하여 불필요한 rebuild 방지
+                  // _StrokePainter의 shouldRepaint가 지우개 위치 변경 시 repaint만 수행
                   RepaintBoundary(
-                    key: ValueKey('strokes_${_strokes.length}_${_selectedStrokeIds.length}_${_lastErasePoint?.dx.toInt()}_${_lastErasePoint?.dy.toInt()}'),
+                    key: ValueKey('strokes_${_strokes.length}_${_selectedStrokeIds.length}'),
                     child: CustomPaint(
                       painter: _StrokePainter(
                         strokes: _strokes,
@@ -612,6 +632,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                         shapeColor: widget.strokeColor,
                         shapeWidth: widget.strokeWidth,
                       ),
+                      isComplex: true,
+                      willChange: _currentStroke != null || widget.drawingTool == DrawingTool.eraser,
                       size: Size.infinite,
                     ),
                   ),
@@ -1084,6 +1106,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   void _onPointerDown(PointerDownEvent event) {
     final startTime = DateTime.now().millisecondsSinceEpoch;
+
+    // 캔버스 터치 시작 시 패널 닫기 콜백 호출
+    widget.onCanvasTouchStart?.call();
 
     // === 올가미 디버그: 항상 현재 도구 상태 로깅 ===
     final nativeType = _windowsPointerService.getMostRecentPointerType();
