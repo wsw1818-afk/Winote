@@ -405,6 +405,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                             key: _canvasKey,
                             strokeColor: _currentColor,
                             strokeWidth: _currentWidth,
+                            highlighterColor: _highlighterColor, // 형광펜 전용 색상
+                            highlighterWidth: _highlighterWidth, // 형광펜 전용 굵기
                             eraserWidth: _eraserWidth,
                             highlighterOpacity: _highlighterOpacity,
                             toolType: _toolTypeFromDrawingTool(_currentTool),

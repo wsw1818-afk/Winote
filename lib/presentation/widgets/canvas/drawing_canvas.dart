@@ -20,6 +20,8 @@ import '../../../core/providers/drawing_state.dart';
 class DrawingCanvas extends StatefulWidget {
   final Color strokeColor;
   final double strokeWidth;
+  final Color highlighterColor; // 형광펜 전용 색상
+  final double highlighterWidth; // 형광펜 전용 굵기
   final double eraserWidth;
   final double highlighterOpacity; // 형광펜 투명도
   final ToolType toolType;
@@ -56,6 +58,8 @@ class DrawingCanvas extends StatefulWidget {
     super.key,
     this.strokeColor = Colors.black,
     this.strokeWidth = 2.0,
+    this.highlighterColor = const Color(0xFFFFEB3B), // 기본 노랑
+    this.highlighterWidth = 20.0,
     this.eraserWidth = 20.0,
     this.highlighterOpacity = 0.4,
     this.toolType = ToolType.pen,
@@ -782,9 +786,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                   trail: _presentationHighlighterTrail,
                   scale: _scale,
                   offset: _offset,
-                  color: widget.strokeColor,
-                  strokeWidth: widget.strokeWidth,
+                  color: widget.highlighterColor, // 형광펜 색상 사용
+                  strokeWidth: widget.highlighterWidth, // 형광펜 굵기 사용
                   opacity: _presentationHighlighterOpacity,
+                  highlighterOpacity: widget.highlighterOpacity, // 형광펜 투명도 사용
                 ),
               ),
             ),
@@ -1202,14 +1207,17 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Track if finger tapped on element (set in finger touch block)
     bool tappedOnElement = false;
 
-    // 올가미 도구: S-Pen이 touch로 감지되어도 첫 포인터는 올가미로 처리
-    // Windows에서 S-Pen은 종종 touch로 감지되므로, 올가미 도구 선택 시 첫 터치를 허용
-    if (widget.drawingTool == DrawingTool.lasso && _activePointerId == null) {
-      // S-Pen 또는 첫 번째 터치인 경우 올가미 도구 처리로 진행
-      // (아래 올가미 처리 코드로 fall through)
-      _log('=== LASSO TOOL ACTIVE === Allowing first pointer for lasso, isFingerTouch: $isFingerTouch');
+    // 올가미/레이저포인터/프레젠테이션형광펜 도구: S-Pen이 touch로 감지되어도 첫 포인터는 해당 도구로 처리
+    // Windows에서 S-Pen은 종종 touch로 감지되므로, 이 도구들 선택 시 첫 터치를 허용
+    final isSpecialTool = widget.drawingTool == DrawingTool.lasso ||
+                          widget.drawingTool == DrawingTool.laserPointer ||
+                          widget.drawingTool == DrawingTool.presentationHighlighter;
+    if (isSpecialTool && _activePointerId == null) {
+      // S-Pen 또는 첫 번째 터치인 경우 해당 도구 처리로 진행
+      // (아래 도구별 처리 코드로 fall through)
+      _log('=== SPECIAL TOOL ACTIVE (${widget.drawingTool}) === Allowing first pointer, isFingerTouch: $isFingerTouch');
     }
-    // Track all finger touches for gestures (올가미 도구가 아닐 때만)
+    // Track all finger touches for gestures (특수 도구가 아닐 때만)
     // 핀치 줌 시작: 첫 번째 손가락이 이미 등록된 상태에서 두 번째 손가락이 오면 PEN으로 감지되어도 추가
     // Windows에서 두 번째 손가락이 PEN으로 감지되는 문제 해결
     else if (isFingerTouch || (_activePointers.isNotEmpty && !_isPenDrawing)) {
@@ -1312,9 +1320,11 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
-    // Touch input check (올가미 도구와 요소 탭은 예외)
+    // Touch input check (올가미/레이저포인터/프레젠테이션형광펜 도구와 요소 탭은 예외)
     final isLassoFirstTouch = widget.drawingTool == DrawingTool.lasso && _activePointerId == null;
-    if (!allowed && !isLassoFirstTouch && !tappedOnElement) {
+    final isLaserPointer = widget.drawingTool == DrawingTool.laserPointer;
+    final isPresentationHighlighter = widget.drawingTool == DrawingTool.presentationHighlighter;
+    if (!allowed && !isLassoFirstTouch && !isLaserPointer && !isPresentationHighlighter && !tappedOnElement) {
       setState(() {
         _lastDeviceKind = '${_getDeviceKindName(event.kind)} (ignored)';
       });
@@ -1330,11 +1340,12 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Check if tapping on an image or text first (any tool)
     final canvasPosForHitTest = _screenToCanvas(event.localPosition);
 
-    // 펜/하이라이터/지우개/레이저포인터/도형 도구일 때는 이미지/텍스트/도형/표 위에서도 동작 가능하도록 선택 건너뛰기
+    // 펜/하이라이터/지우개/레이저포인터/프레젠테이션형광펜/도형 도구일 때는 이미지/텍스트/도형/표 위에서도 동작 가능하도록 선택 건너뛰기
     final isDrawingOrEraserTool = widget.drawingTool == DrawingTool.pen ||
                                    widget.drawingTool == DrawingTool.highlighter ||
                                    widget.drawingTool == DrawingTool.eraser ||
                                    widget.drawingTool == DrawingTool.laserPointer ||
+                                   widget.drawingTool == DrawingTool.presentationHighlighter ||
                                    _isShapeTool(widget.drawingTool);
 
     // Check for image tap (reversed order to select topmost) - only when NOT drawing
@@ -2801,14 +2812,15 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
-    // Handle presentation highlighter end - start fade animation or clear immediately
+    // Handle presentation highlighter end - start fade animation or save as highlighter stroke
     if (widget.drawingTool == DrawingTool.presentationHighlighter && _presentationHighlighterTrail.isNotEmpty) {
       _activePointerId = null;  // 다음 터치를 허용하기 위해 초기화
       _isPenDrawing = false;
       if (widget.presentationHighlighterFadeEnabled) {
         _startPresentationHighlighterFade();
       } else {
-        // 페이드 OFF면 바로 트레일 삭제
+        // 페이드 OFF면 형광펜 스트로크로 저장
+        _savePresentationHighlighterAsStroke();
         setState(() {
           _presentationHighlighterTrail.clear();
         });
@@ -3026,6 +3038,42 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         }
       });
     });
+  }
+
+  /// Save presentation highlighter trail as a highlighter stroke (when fade is OFF)
+  void _savePresentationHighlighterAsStroke() {
+    if (_presentationHighlighterTrail.isEmpty) return;
+
+    _saveState();
+
+    // 트레일을 형광펜 스트로크로 변환
+    final points = _presentationHighlighterTrail.map((offset) =>
+      StrokePoint(
+        x: offset.dx,
+        y: offset.dy,
+        pressure: 0.5, // 기본 압력
+        tilt: 0.0,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+      )
+    ).toList();
+
+    if (points.length < 2) return;
+
+    final newStroke = Stroke(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      toolType: ToolType.highlighter, // 형광펜으로 저장
+      color: widget.highlighterColor, // 형광펜 색상 사용
+      width: widget.highlighterWidth, // 형광펜 굵기 사용
+      points: points,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    );
+
+    setState(() {
+      _strokes.add(newStroke);
+    });
+
+    widget.onStrokesChanged?.call(_strokes);
+    _log('PresentationHighlighter saved as highlighter stroke: ${newStroke.id}');
   }
 
   /// Start presentation highlighter fade animation - removes from beginning (first drawn)
@@ -4049,6 +4097,7 @@ class _PresentationHighlighterPainter extends CustomPainter {
   final Color color;
   final double strokeWidth;
   final double opacity;
+  final double highlighterOpacity; // 형광펜 투명도
 
   _PresentationHighlighterPainter({
     required this.trail,
@@ -4057,6 +4106,7 @@ class _PresentationHighlighterPainter extends CustomPainter {
     required this.color,
     required this.strokeWidth,
     required this.opacity,
+    this.highlighterOpacity = 0.4,
   });
 
   @override
@@ -4080,9 +4130,9 @@ class _PresentationHighlighterPainter extends CustomPainter {
         path.lineTo(screenTrail[i].dx, screenTrail[i].dy);
       }
 
-      // Main highlighter stroke with current opacity
+      // Main highlighter stroke with current opacity (형광펜 투명도 적용)
       final highlighterPaint = Paint()
-        ..color = color.withOpacity(0.5 * opacity)
+        ..color = color.withOpacity(highlighterOpacity * opacity)
         ..strokeWidth = strokeWidth * scale
         ..style = PaintingStyle.stroke
         ..strokeCap = StrokeCap.round
@@ -4092,7 +4142,7 @@ class _PresentationHighlighterPainter extends CustomPainter {
 
       // Add a subtle glow effect
       final glowPaint = Paint()
-        ..color = color.withOpacity(0.2 * opacity)
+        ..color = color.withOpacity(highlighterOpacity * 0.4 * opacity)
         ..strokeWidth = (strokeWidth + 8) * scale
         ..style = PaintingStyle.stroke
         ..strokeCap = StrokeCap.round
@@ -4110,7 +4160,8 @@ class _PresentationHighlighterPainter extends CustomPainter {
         offset != oldDelegate.offset ||
         color != oldDelegate.color ||
         strokeWidth != oldDelegate.strokeWidth ||
-        opacity != oldDelegate.opacity;
+        opacity != oldDelegate.opacity ||
+        highlighterOpacity != oldDelegate.highlighterOpacity;
   }
 }
 
