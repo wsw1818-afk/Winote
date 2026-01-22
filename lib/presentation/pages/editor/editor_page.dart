@@ -77,6 +77,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   // Presentation highlighter fade mode
   bool _presentationHighlighterFadeEnabled = true;
+  double _presentationHighlighterFadeSpeed = 1.0; // 1.0 = 기본(1.5초), 0.5 = 느림(3초), 2.0 = 빠름(0.75초)
 
   // Track undo/redo state - ValueNotifier로 불필요한 rebuild 방지
   final ValueNotifier<bool> _canUndoNotifier = ValueNotifier(false);
@@ -417,6 +418,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                             lassoColor: _currentColor,
                             laserPointerColor: _laserPointerColor,
                             presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
+                            presentationHighlighterFadeSpeed: _presentationHighlighterFadeSpeed,
                             showDebugOverlay: _showDebugOverlay,
                             initialShapes: _currentNote?.getShapesForPage(_currentPageIndex),
                             onStrokesChanged: (strokes) {
@@ -543,6 +545,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
                         onPresentationHighlighterFadeChanged: (enabled) {
                           setState(() => _presentationHighlighterFadeEnabled = enabled);
+                        },
+                        presentationHighlighterFadeSpeed: _presentationHighlighterFadeSpeed,
+                        onPresentationHighlighterFadeSpeedChanged: (speed) {
+                          setState(() => _presentationHighlighterFadeSpeed = speed);
                         },
                         onPanelOpened: (closeCallback) {
                           // 패널이 열릴 때 닫기 콜백 저장 (캔버스에서 호출)

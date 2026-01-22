@@ -41,6 +41,9 @@ class QuickToolbar extends StatefulWidget {
   // Presentation highlighter fade mode
   final bool presentationHighlighterFadeEnabled;
   final void Function(bool)? onPresentationHighlighterFadeChanged;
+  // Presentation highlighter fade speed
+  final double presentationHighlighterFadeSpeed;
+  final void Function(double)? onPresentationHighlighterFadeSpeedChanged;
   // 패널 상태 콜백 (캔버스 터치 시 패널 닫기 위해)
   // 패널이 열릴 때 닫기 콜백을 부모에게 전달
   final void Function(VoidCallback closeCallback)? onPanelOpened;
@@ -78,6 +81,8 @@ class QuickToolbar extends StatefulWidget {
     this.onLaserPointerColorChanged,
     this.presentationHighlighterFadeEnabled = true,
     this.onPresentationHighlighterFadeChanged,
+    this.presentationHighlighterFadeSpeed = 1.0,
+    this.onPresentationHighlighterFadeSpeedChanged,
     this.onPanelOpened,
   });
 
@@ -169,21 +174,17 @@ class _QuickToolbarState extends State<QuickToolbar> {
     widget.onPanelOpened?.call(_closeOverlay);
   }
 
-  // 기본 프리셋 색상 (초기값, 설정 로드 전) - 14개 확장
+  // 기본 프리셋 색상 (초기값, 설정 로드 전) - 10개 (형광펜과 동일 레이아웃)
   static const List<Color> _defaultColors = [
-    // 1열 (7개)
+    // 1열 (5개)
     Colors.black,
     Color(0xFF424242), // Dark Gray
     Color(0xFF1976D2), // Blue
-    Color(0xFF0097A7), // Cyan
     Color(0xFF388E3C), // Green
-    Color(0xFF689F38), // Light Green
-    Color(0xFFFFEB3B), // Yellow
-    // 2열 (7개)
+    Color(0xFFD32F2F), // Red
+    // 2열 (5개)
     Colors.white,
     Color(0xFF795548), // Brown
-    Color(0xFFD32F2F), // Red
-    Color(0xFFE91E63), // Pink
     Color(0xFFF57C00), // Orange
     Color(0xFF7B1FA2), // Purple
     Color(0xFF3F51B5), // Indigo
@@ -1100,14 +1101,24 @@ class _QuickToolbarState extends State<QuickToolbar> {
     );
   }
 
-  /// Build presentation highlighter tool button - tap toggles fade ON/OFF
+  /// Build presentation highlighter tool button - tap toggles fade ON/OFF, long press shows speed panel
   Widget _buildPresentationHighlighterToolButton(BuildContext context) {
     final isSelected = widget.currentTool == DrawingTool.presentationHighlighter;
 
+    // 속도에 따른 라벨
+    String speedLabel = '';
+    if (widget.presentationHighlighterFadeSpeed <= 0.1) {
+      speedLabel = '느림';
+    } else if (widget.presentationHighlighterFadeSpeed >= 2.0) {
+      speedLabel = '빠름';
+    } else {
+      speedLabel = '보통';
+    }
+
     return Tooltip(
       message: widget.presentationHighlighterFadeEnabled
-          ? '프레젠테이션 형광펜 ON (탭하여 OFF)'
-          : '프레젠테이션 형광펜 OFF (탭하여 ON)',
+          ? '프레젠테이션 형광펜 ON ($speedLabel) - 탭: ON/OFF, 길게 누름: 속도 조절'
+          : '프레젠테이션 형광펜 OFF (저장됨) - 탭: ON/OFF',
       child: GestureDetector(
         onTap: () {
           // 이미 선택되어 있으면 ON/OFF 토글, 아니면 도구만 선택 (ON/OFF 상태 유지)
@@ -1117,6 +1128,10 @@ class _QuickToolbarState extends State<QuickToolbar> {
             widget.onToolChanged(DrawingTool.presentationHighlighter);
             // 도구 선택 시 기존 ON/OFF 상태 유지 (변경하지 않음)
           }
+        },
+        onLongPress: () {
+          // 롱프레스: 속도 조절 패널 표시
+          _showPresentationHighlighterSpeedPanel(context);
         },
         child: Container(
           padding: const EdgeInsets.all(6),
@@ -1145,6 +1160,113 @@ class _QuickToolbarState extends State<QuickToolbar> {
             color: widget.presentationHighlighterFadeEnabled
                 ? (isSelected ? Colors.amber[800] : Colors.amber[600])
                 : (isSelected ? Colors.grey[600] : Colors.grey[500]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Show presentation highlighter speed panel
+  void _showPresentationHighlighterSpeedPanel(BuildContext context) {
+    final RenderBox? renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+
+    final position = renderBox.localToGlobal(Offset.zero);
+
+    // 패널 닫기 함수
+    void closePanel() {
+      _currentOverlay?.remove();
+      _currentOverlay = null;
+    }
+
+    // 기존 패널 닫기
+    closePanel();
+
+    // 패널 오픈 콜백 전달 (캔버스 터치 시 패널 닫기 위해)
+    widget.onPanelOpened?.call(closePanel);
+
+    _currentOverlay = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          // 배경 터치 시 패널 닫기
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: closePanel,
+              child: Container(color: Colors.transparent),
+            ),
+          ),
+          // 패널
+          Positioned(
+            left: position.dx - 40,
+            top: position.dy - 120,
+            child: Material(
+              elevation: 8,
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      '사라지는 속도',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildSpeedButton(0.075, '느림', closePanel), // ~33초
+                        const SizedBox(width: 8),
+                        _buildSpeedButton(1.0, '보통', closePanel), // 2.5초
+                        const SizedBox(width: 8),
+                        _buildSpeedButton(2.5, '빠름', closePanel), // 1초
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    Overlay.of(context).insert(_currentOverlay!);
+  }
+
+  /// Build speed selection button
+  Widget _buildSpeedButton(double speed, String label, VoidCallback closePanel) {
+    final isSelected = (widget.presentationHighlighterFadeSpeed - speed).abs() < 0.1;
+
+    return GestureDetector(
+      onTap: () {
+        widget.onPresentationHighlighterFadeSpeedChanged?.call(speed);
+        closePanel();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.amber.withOpacity(0.3) : Colors.grey.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isSelected ? Colors.amber[700]! : Colors.grey[300]!,
+            width: isSelected ? 2 : 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            color: isSelected ? Colors.amber[800] : Colors.grey[600],
           ),
         ),
       ),
@@ -1608,7 +1730,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
   Widget build(BuildContext context) {
     return Positioned(
       left: widget.buttonPosition.dx - 50,
-      top: widget.buttonPosition.dy - 90,
+      top: widget.buttonPosition.dy - 110, // 메인 툴바를 가리지 않도록 위로 이동
       child: Material(
         elevation: 8,
         borderRadius: BorderRadius.circular(12),
@@ -1635,10 +1757,10 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  // 1열 (7개)
+                  // 1열 (5개)
                   Row(
                     mainAxisSize: MainAxisSize.min,
-                    children: widget.defaultColors.take(7).map((color) {
+                    children: widget.defaultColors.take(5).map((color) {
                       final isThisColorSelected = _localColor.value == color.value;
                       return Listener(
                         behavior: HitTestBehavior.opaque,
@@ -1654,7 +1776,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                             color: color,
                             borderRadius: BorderRadius.circular(6),
                             border: Border.all(
-                              color: isThisColorSelected ? Colors.blue : (color == Colors.white ? Colors.grey[400]! : Colors.grey[300]!),
+                              color: isThisColorSelected ? Colors.blue : Colors.grey[300]!,
                               width: isThisColorSelected ? 2.5 : 1,
                             ),
                           ),
@@ -1665,10 +1787,10 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                       );
                     }).toList(),
                   ),
-                  // 2열 (7개)
+                  // 2열 (5개)
                   Row(
                     mainAxisSize: MainAxisSize.min,
-                    children: widget.defaultColors.skip(7).map((color) {
+                    children: widget.defaultColors.skip(5).map((color) {
                       final isThisColorSelected = _localColor.value == color.value;
                       return Listener(
                         behavior: HitTestBehavior.opaque,
@@ -1684,7 +1806,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                             color: color,
                             borderRadius: BorderRadius.circular(6),
                             border: Border.all(
-                              color: isThisColorSelected ? Colors.blue : (color == Colors.white ? Colors.grey[400]! : Colors.grey[300]!),
+                              color: isThisColorSelected ? Colors.blue : Colors.grey[300]!,
                               width: isThisColorSelected ? 2.5 : 1,
                             ),
                           ),
@@ -1719,7 +1841,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                   const SizedBox(height: 6),
                   Row(
                     mainAxisSize: MainAxisSize.min,
-                    children: QuickToolbar.penWidthPresets.take(6).map((width) {
+                    children: QuickToolbar.penWidthPresets.take(5).map((width) {
                       final isThisWidthSelected = (_localWidth - width).abs() < 0.1;
                       return Tooltip(
                         message: _formatWidth(width),
@@ -1734,10 +1856,10 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                             height: 28,
                             margin: const EdgeInsets.symmetric(horizontal: 2),
                             decoration: BoxDecoration(
-                              color: isThisWidthSelected ? Colors.blue.withOpacity(0.1) : null,
+                              color: isThisWidthSelected ? Colors.blue[700]!.withOpacity(0.1) : null,
                               borderRadius: BorderRadius.circular(6),
                               border: Border.all(
-                                color: isThisWidthSelected ? Colors.blue : Colors.grey[300]!,
+                                color: isThisWidthSelected ? Colors.blue[700]! : Colors.grey[300]!,
                                 width: isThisWidthSelected ? 2 : 1,
                               ),
                             ),
@@ -1747,7 +1869,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                                 style: TextStyle(
                                   fontSize: 10,
                                   fontWeight: isThisWidthSelected ? FontWeight.bold : FontWeight.normal,
-                                  color: isThisWidthSelected ? Colors.blue : Colors.grey[800],
+                                  color: isThisWidthSelected ? Colors.blue[700] : Colors.grey[800],
                                 ),
                               ),
                             ),

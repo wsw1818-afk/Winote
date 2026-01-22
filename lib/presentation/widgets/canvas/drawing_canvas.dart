@@ -51,6 +51,7 @@ class DrawingCanvas extends StatefulWidget {
   final void Function(bool hasSelection)? onTableSelectionChanged;
   final void Function(double scale, Offset offset)? onTransformChanged;
   final bool presentationHighlighterFadeEnabled;
+  final double presentationHighlighterFadeSpeed; // 페이드 속도 배율 (1.0 = 기본, 2.0 = 2배 빠름)
   // 패널 닫기 콜백 (캔버스 터치 시 패널 닫기)
   final VoidCallback? onCanvasTouchStart;
 
@@ -89,6 +90,7 @@ class DrawingCanvas extends StatefulWidget {
     this.onTableSelectionChanged,
     this.onTransformChanged,
     this.presentationHighlighterFadeEnabled = true,
+    this.presentationHighlighterFadeSpeed = 1.0,
     this.onCanvasTouchStart,
   });
 
@@ -238,7 +240,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   Timer? _presentationHighlighterFadeTimer;
   double _presentationHighlighterOpacity = 1.0;
   // 선긋기 중에는 트레일 길이 제한 없음 - 선긋기 완료 후에만 fade 시작
-  static const Duration _presentationHighlighterFadeDuration = Duration(milliseconds: 1500); // 1.5초 페이드
+  static const Duration _presentationHighlighterFadeDuration = Duration(milliseconds: 2500); // 2.5초 페이드 (기본)
 
   // 삭제 버튼 표시 상태 (1초 롱프레스 후 표시)
   String? _showDeleteButtonForTableId;
@@ -2508,16 +2510,16 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         }
 
         if (_lastFocalPoint != null && _baseSpan > 0 && _canvasSize != null) {
-          // Calculate scale factor from pinch gesture
+          // 핀치 시작 시점 대비 스케일 변화율 계산
           final rawScaleFactor = currentSpan / _baseSpan;
 
-          // Direct scale calculation with clamping (zoom in only: 1.0x ~ 1.5x)
-          final newScale = (_baseScale * rawScaleFactor).clamp(1.0, 1.5);
+          // 새 스케일 계산 (클램핑: 1.0x ~ 3.0x)
+          final newScale = (_baseScale * rawScaleFactor).clamp(1.0, 3.0);
 
-          // Zoom toward canvas center (용지 중심 기준 확대)
-          final canvasCenter = Offset(_canvasSize!.width / 2, _canvasSize!.height / 2);
-          final canvasCenterInCanvas = (canvasCenter - _baseOffset) / _baseScale;
-          final newOffset = canvasCenter - canvasCenterInCanvas * newScale;
+          // 핀치 중심(focal point) 기준으로 오프셋 계산
+          // 현재 focal point가 가리키는 캔버스 좌표가 줌 후에도 같은 화면 위치에 있도록
+          final focalInCanvas = (currentFocal - _offset) / _scale;
+          final newOffset = currentFocal - focalInCanvas * newScale;
 
           _scale = newScale;
           _offset = newOffset;
@@ -2559,7 +2561,11 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
-    final allowed = _isAllowedInput(event);
+    // 이미 활성화된 포인터로 그리는 중이면 _isAllowedInput 체크 생략
+    // (MOVE 중에 Native API가 다른 포인터 정보를 반환하면 스트로크가 중단되는 문제 방지)
+    final allowed = (event.pointer == _activePointerId && _currentStroke != null)
+        ? true
+        : _isAllowedInput(event);
 
     // Log every 10th move (performance optimization)
     if (_inputCount % 10 == 0) {
@@ -2782,7 +2788,11 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _log('Gesture mode ended');
       } else if (_activePointers.length == 1) {
         // Back to single finger - update base for continued pan
+        _isGesturing = false;  // 핀치 줌 모드 해제
         _lastFocalPoint = _activePointers.values.first;
+        // 현재 상태를 새 기준점으로 저장 (다시 2손가락이 되면 여기서 시작)
+        _baseScale = _scale;
+        _baseOffset = _offset;
       }
       return;
     }
@@ -3083,12 +3093,22 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     if (_presentationHighlighterTrail.isEmpty) return;
 
+    // 속도에 따라 페이드 시간 조정 (속도가 높을수록 빠르게 사라짐)
+    // 기본 1.5초, 느림(0.5x) = 3초, 빠름(2.0x) = 0.75초
+    final adjustedDurationMs = (_presentationHighlighterFadeDuration.inMilliseconds / widget.presentationHighlighterFadeSpeed).round();
+
     // 처음 그어진 부분부터 점차 지우기
     final totalPoints = _presentationHighlighterTrail.length;
-    int pointsToRemovePerStep = (totalPoints / 30).ceil().clamp(1, 10); // 30단계로 나눠서 제거
-    int stepDuration = _presentationHighlighterFadeDuration.inMilliseconds ~/ 30;
 
-    _presentationHighlighterFadeTimer = Timer.periodic(Duration(milliseconds: stepDuration), (timer) {
+    // 고정 간격(50ms)으로 타이머 실행, 매 스텝마다 제거할 포인트 수를 계산
+    const int stepInterval = 50; // 50ms 간격
+    final int totalSteps = (adjustedDurationMs / stepInterval).ceil();
+
+    // 매 스텝마다 제거할 포인트 수 (일정하게 유지)
+    final double pointsPerStep = totalPoints / totalSteps;
+    double accumulatedPoints = 0;
+
+    _presentationHighlighterFadeTimer = Timer.periodic(const Duration(milliseconds: stepInterval), (timer) {
       if (!mounted) {
         timer.cancel();
         _presentationHighlighterFadeTimer = null;
@@ -3096,8 +3116,16 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       }
 
       setState(() {
+        // 누적 포인트 계산하여 일정한 속도로 제거
+        accumulatedPoints += pointsPerStep;
+        int pointsToRemove = accumulatedPoints.floor();
+        accumulatedPoints -= pointsToRemove;
+
+        // 최소 1개는 제거
+        pointsToRemove = pointsToRemove.clamp(1, _presentationHighlighterTrail.length);
+
         // 앞쪽(처음 그어진 부분)에서 포인트 제거
-        for (int i = 0; i < pointsToRemovePerStep && _presentationHighlighterTrail.isNotEmpty; i++) {
+        for (int i = 0; i < pointsToRemove && _presentationHighlighterTrail.isNotEmpty; i++) {
           _presentationHighlighterTrail.removeAt(0);
         }
 
