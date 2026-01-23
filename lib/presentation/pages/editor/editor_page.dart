@@ -368,26 +368,97 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       ),
       body: Column(
         children: [
-          // Toolbar (전역 설정: 실행취소/다시실행, 색상, 전체삭제)
-          DrawingToolbar(
-            currentColor: _currentColor,
-            canUndoNotifier: _canUndoNotifier,
-            canRedoNotifier: _canRedoNotifier,
-            onUndo: () {
-              _canvasKey.currentState?.undo();
-              _updateUndoRedoState();
-            },
-            onRedo: () {
-              _canvasKey.currentState?.redo();
-              _updateUndoRedoState();
-            },
-            onClear: _showClearConfirmDialog,
-            onColorChanged: (color) {
-              setState(() {
-                // DrawingToolbar는 펜 색상만 변경 (형광펜은 QuickToolbar에서 변경)
-                _penColor = color;
-              });
-            },
+          // Quick toolbar - 노트 영역 위에 배치
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            color: Colors.grey[100],
+            child: Center(
+              child: QuickToolbar(
+                currentTool: _currentTool,
+                currentColor: _penColor,
+                highlighterColor: _highlighterColor,
+                currentWidth: _penWidth,
+                highlighterWidth: _highlighterWidth,
+                eraserWidth: _eraserWidth,
+                highlighterOpacity: _highlighterOpacity,
+                currentTemplate: _currentTemplate,
+                hasSelection: _canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false,
+                onToolChanged: (tool) {
+                  setState(() => _currentTool = tool);
+                  if (tool != DrawingTool.lasso) {
+                    _canvasKey.currentState?.clearSelection();
+                  }
+                },
+                onColorChanged: (color) {
+                  setState(() => _penColor = color);
+                },
+                onHighlighterColorChanged: (color) {
+                  setState(() => _highlighterColor = color);
+                },
+                onWidthChanged: (width) {
+                  setState(() => _penWidth = width);
+                },
+                onHighlighterWidthChanged: (width) {
+                  setState(() => _highlighterWidth = width);
+                },
+                onEraserWidthChanged: (width) {
+                  setState(() => _eraserWidth = width);
+                },
+                onHighlighterOpacityChanged: (opacity) {
+                  setState(() => _highlighterOpacity = opacity);
+                },
+                onTemplateChanged: (template) {
+                  setState(() {
+                    if (_backgroundImagePath != null) {
+                      if (template == PageTemplate.blank) {
+                        _overlayTemplate = null;
+                      } else {
+                        _overlayTemplate = template;
+                      }
+                    } else {
+                      _currentTemplate = template;
+                    }
+                    _hasChanges = true;
+                  });
+                },
+                onCopySelection: () {
+                  _canvasKey.currentState?.copySelection();
+                  _updateUndoRedoState();
+                  setState(() => _hasChanges = true);
+                },
+                onDeleteSelection: () {
+                  _canvasKey.currentState?.deleteSelection();
+                  _updateUndoRedoState();
+                  setState(() => _hasChanges = true);
+                },
+                onClearSelection: () {
+                  _canvasKey.currentState?.clearSelection();
+                  setState(() {});
+                },
+                onInsertImage: _insertImage,
+                onInsertText: _insertTextBox,
+                onInsertTable: _showInsertTableDialog,
+                onSelectBackgroundImage: _selectBackgroundImage,
+                onClearBackgroundImage: _clearBackgroundImage,
+                hasBackgroundImage: _backgroundImagePath != null,
+                overlayTemplate: _overlayTemplate,
+                laserPointerColor: _laserPointerColor,
+                onLaserPointerColorChanged: (color) {
+                  setState(() => _laserPointerColor = color);
+                },
+                presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
+                onPresentationHighlighterFadeChanged: (enabled) {
+                  setState(() => _presentationHighlighterFadeEnabled = enabled);
+                },
+                presentationHighlighterFadeSpeed: _presentationHighlighterFadeSpeed,
+                onPresentationHighlighterFadeSpeedChanged: (speed) {
+                  setState(() => _presentationHighlighterFadeSpeed = speed);
+                },
+                onPanelOpened: (closeCallback) {
+                  _closePanelCallback = closeCallback;
+                },
+              ),
+            ),
           ),
           // Canvas - A4 비율로 화면 가득 채움
           Expanded(
@@ -454,109 +525,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                     ),
                   ),
                 ),
-                // Floating quick toolbar at bottom center
-                  Positioned(
-                    bottom: 16,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: QuickToolbar(
-                        currentTool: _currentTool,
-                        currentColor: _penColor, // 펜 전용 색상
-                        highlighterColor: _highlighterColor, // 형광펜 전용 색상
-                        currentWidth: _penWidth, // 펜 전용 굵기
-                        highlighterWidth: _highlighterWidth, // 형광펜 전용 굵기
-                        eraserWidth: _eraserWidth,
-                        highlighterOpacity: _highlighterOpacity,
-                        currentTemplate: _currentTemplate,
-                        hasSelection: _canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false,
-                        onToolChanged: (tool) {
-                          setState(() => _currentTool = tool);
-                          // Clear selection when switching away from lasso
-                          if (tool != DrawingTool.lasso) {
-                            _canvasKey.currentState?.clearSelection();
-                          }
-                        },
-                        onColorChanged: (color) {
-                          // 펜 색상 변경
-                          setState(() => _penColor = color);
-                        },
-                        onHighlighterColorChanged: (color) {
-                          // 형광펜 색상 변경
-                          setState(() => _highlighterColor = color);
-                        },
-                        onWidthChanged: (width) {
-                          // 펜 굵기 변경
-                          setState(() => _penWidth = width);
-                        },
-                        onHighlighterWidthChanged: (width) {
-                          // 형광펜 굵기 변경
-                          setState(() => _highlighterWidth = width);
-                        },
-                        onEraserWidthChanged: (width) {
-                          setState(() => _eraserWidth = width);
-                          SettingsService.instance.setDefaultEraserWidth(width);
-                        },
-                        onHighlighterOpacityChanged: (opacity) {
-                          setState(() => _highlighterOpacity = opacity);
-                        },
-                        onTemplateChanged: (template) {
-                          setState(() {
-                            // 배경 이미지가 있으면 overlayTemplate을 변경
-                            if (_backgroundImagePath != null) {
-                              // blank나 customImage 선택 시 오버레이 제거, 아니면 오버레이 설정
-                              if (template == PageTemplate.blank || template == PageTemplate.customImage) {
-                                _overlayTemplate = null;
-                              } else {
-                                _overlayTemplate = template;
-                              }
-                            } else {
-                              // 배경 이미지가 없으면 기본 템플릿 변경
-                              _currentTemplate = template;
-                            }
-                            _hasChanges = true;
-                          });
-                        },
-                        onCopySelection: () {
-                          _canvasKey.currentState?.copySelection();
-                          _updateUndoRedoState();
-                          setState(() => _hasChanges = true);
-                        },
-                        onDeleteSelection: () {
-                          _canvasKey.currentState?.deleteSelection();
-                          _updateUndoRedoState();
-                          setState(() => _hasChanges = true);
-                        },
-                        onClearSelection: () {
-                          _canvasKey.currentState?.clearSelection();
-                          setState(() {});
-                        },
-                        onInsertImage: _insertImage,
-                        onInsertText: _insertTextBox,
-                        onInsertTable: _showInsertTableDialog,
-                        onSelectBackgroundImage: _selectBackgroundImage,
-                        onClearBackgroundImage: _clearBackgroundImage,
-                        hasBackgroundImage: _backgroundImagePath != null,
-                        overlayTemplate: _overlayTemplate,
-                        laserPointerColor: _laserPointerColor,
-                        onLaserPointerColorChanged: (color) {
-                          setState(() => _laserPointerColor = color);
-                        },
-                        presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
-                        onPresentationHighlighterFadeChanged: (enabled) {
-                          setState(() => _presentationHighlighterFadeEnabled = enabled);
-                        },
-                        presentationHighlighterFadeSpeed: _presentationHighlighterFadeSpeed,
-                        onPresentationHighlighterFadeSpeedChanged: (speed) {
-                          setState(() => _presentationHighlighterFadeSpeed = speed);
-                        },
-                        onPanelOpened: (closeCallback) {
-                          // 패널이 열릴 때 닫기 콜백 저장 (캔버스에서 호출)
-                          _closePanelCallback = closeCallback;
-                        },
-                      ),
-                    ),
-                  ),
                   // Image edit toolbar (floating at top right, Transform 외부)
                   if (_showImageEditToolbar)
                     Positioned(
