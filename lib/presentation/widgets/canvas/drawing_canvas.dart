@@ -3147,6 +3147,41 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         tool == DrawingTool.shapeArrow;
   }
 
+  /// Snap angle to nearest 15 degrees for line/arrow tools
+  /// Returns snapped end point based on start point
+  Offset _snapToAngle(Offset start, Offset end, {double snapAngle = 15.0}) {
+    final dx = end.dx - start.dx;
+    final dy = end.dy - start.dy;
+    final distance = math.sqrt(dx * dx + dy * dy);
+
+    if (distance < 5) return end; // Too short to snap
+
+    // Calculate current angle in degrees
+    double angle = math.atan2(dy, dx) * 180 / math.pi;
+
+    // Snap to nearest snapAngle degrees
+    double snappedAngle = (angle / snapAngle).round() * snapAngle;
+
+    // Convert back to radians and calculate new end point
+    double radians = snappedAngle * math.pi / 180;
+    return Offset(
+      start.dx + distance * math.cos(radians),
+      start.dy + distance * math.sin(radians),
+    );
+  }
+
+  /// Snap rectangle/circle to square/circle when Shift is held (or aspect ratio lock)
+  Offset _snapToSquare(Offset start, Offset end) {
+    final dx = (end.dx - start.dx).abs();
+    final dy = (end.dy - start.dy).abs();
+    final size = math.max(dx, dy);
+
+    return Offset(
+      start.dx + (end.dx > start.dx ? size : -size),
+      start.dy + (end.dy > start.dy ? size : -size),
+    );
+  }
+
   /// Generate stroke points for a shape
   List<StrokePoint> _generateShapePoints(DrawingTool tool, Offset start, Offset end) {
     final timestamp = DateTime.now().millisecondsSinceEpoch;

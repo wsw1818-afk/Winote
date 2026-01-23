@@ -211,4 +211,20 @@ class SettingsService {
     _settings['touchDrawingEnabled'] = enabled;
     await _save();
   }
+
+  // Shape snap enabled (도형 각도 스냅)
+  bool get shapeSnapEnabled => _settings['shapeSnapEnabled'] as bool? ?? true;
+
+  Future<void> setShapeSnapEnabled(bool enabled) async {
+    _settings['shapeSnapEnabled'] = enabled;
+    await _save();
+  }
+
+  // Shape snap angle (스냅 각도 단위, 기본 15도)
+  double get shapeSnapAngle => (_settings['shapeSnapAngle'] as num?)?.toDouble() ?? 15.0;
+
+  Future<void> setShapeSnapAngle(double angle) async {
+    _settings['shapeSnapAngle'] = angle;
+    await _save();
+  }
 }

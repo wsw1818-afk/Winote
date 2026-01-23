@@ -31,6 +31,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   String _twoFingerGestureMode = 'zoom'; // 'zoom' or 'scroll'
   bool _palmRejectionEnabled = true;
   bool _touchDrawingEnabled = false;
+  // Shape snap settings
+  bool _shapeSnapEnabled = true;
+  double _shapeSnapAngle = 15.0;
 
   // Cloud sync settings
   final CloudSyncService _cloudSync = CloudSyncService.instance;
@@ -60,6 +63,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _twoFingerGestureMode = settings.twoFingerGestureMode;
       _palmRejectionEnabled = settings.palmRejectionEnabled;
       _touchDrawingEnabled = settings.touchDrawingEnabled;
+      _shapeSnapEnabled = settings.shapeSnapEnabled;
+      _shapeSnapAngle = settings.shapeSnapAngle;
     });
   }
 
@@ -178,6 +183,41 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               await SettingsService.instance.setTouchDrawingEnabled(value);
             },
           ),
+
+          const Divider(),
+
+          // Shape Settings Section
+          _buildSectionHeader('도형 설정'),
+          SwitchListTile(
+            secondary: const Icon(Icons.straighten),
+            title: const Text('각도 스냅'),
+            subtitle: Text(_shapeSnapEnabled ? '${_shapeSnapAngle.toInt()}° 단위로 스냅' : '꺼짐'),
+            value: _shapeSnapEnabled,
+            onChanged: (value) async {
+              setState(() => _shapeSnapEnabled = value);
+              await SettingsService.instance.setShapeSnapEnabled(value);
+            },
+          ),
+          if (_shapeSnapEnabled)
+            ListTile(
+              leading: const Icon(Icons.rotate_90_degrees_ccw),
+              title: const Text('스냅 각도'),
+              subtitle: Text('${_shapeSnapAngle.toInt()}°'),
+              trailing: SizedBox(
+                width: 150,
+                child: Slider(
+                  value: _shapeSnapAngle,
+                  min: 5,
+                  max: 45,
+                  divisions: 8,
+                  label: '${_shapeSnapAngle.toInt()}°',
+                  onChanged: (value) async {
+                    setState(() => _shapeSnapAngle = value);
+                    await SettingsService.instance.setShapeSnapAngle(value);
+                  },
+                ),
+              ),
+            ),
 
           const Divider(),
 
