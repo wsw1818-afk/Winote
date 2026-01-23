@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -323,7 +324,43 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       );
     }
 
-    return Scaffold(
+    return Shortcuts(
+      shortcuts: <ShortcutActivator, Intent>{
+        const SingleActivator(LogicalKeyboardKey.keyZ, control: true): const UndoIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyY, control: true): const RedoIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyZ, control: true, shift: true): const RedoIntent(),
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true): const SaveIntent(),
+      },
+      child: Actions(
+        actions: <Type, Action<Intent>>{
+          UndoIntent: CallbackAction<UndoIntent>(
+            onInvoke: (_) {
+              if (_canUndoNotifier.value) {
+                _canvasKey.currentState?.undo();
+                _updateUndoRedoState();
+              }
+              return null;
+            },
+          ),
+          RedoIntent: CallbackAction<RedoIntent>(
+            onInvoke: (_) {
+              if (_canRedoNotifier.value) {
+                _canvasKey.currentState?.redo();
+                _updateUndoRedoState();
+              }
+              return null;
+            },
+          ),
+          SaveIntent: CallbackAction<SaveIntent>(
+            onInvoke: (_) {
+              _saveNote();
+              return null;
+            },
+          ),
+        },
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
       appBar: AppBar(
         title: GestureDetector(
           onTap: _showRenameDialog,
@@ -457,6 +494,20 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                 onPanelOpened: (closeCallback) {
                   _closePanelCallback = closeCallback;
                 },
+                // Undo/Redo/Save/Clear
+                onUndo: () {
+                  _canvasKey.currentState?.undo();
+                  _updateUndoRedoState();
+                },
+                onRedo: () {
+                  _canvasKey.currentState?.redo();
+                  _updateUndoRedoState();
+                },
+                onSave: _saveNote,
+                onClear: _showClearConfirmDialog,
+                canUndo: _canUndoNotifier.value,
+                canRedo: _canRedoNotifier.value,
+                hasChanges: _hasChanges,
               ),
             ),
           ),
@@ -562,6 +613,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           // Page navigation bar
           _buildPageNavigationBar(),
         ],
+      ),
+    ),
+        ),
       ),
     );
   }
@@ -2190,4 +2244,17 @@ class _PageThumbnailPainter extends CustomPainter {
   bool shouldRepaint(covariant _PageThumbnailPainter oldDelegate) {
     return strokes.length != oldDelegate.strokes.length;
   }
+}
+
+// 키보드 단축키용 Intent 클래스들
+class UndoIntent extends Intent {
+  const UndoIntent();
+}
+
+class RedoIntent extends Intent {
+  const RedoIntent();
+}
+
+class SaveIntent extends Intent {
+  const SaveIntent();
 }

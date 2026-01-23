@@ -27,6 +27,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   int _autoSaveDelay = 3;
   bool _showDebugOverlay = false;
   String _defaultTemplate = '빈 페이지';
+  // Gesture settings
+  String _twoFingerGestureMode = 'zoom'; // 'zoom' or 'scroll'
+  bool _palmRejectionEnabled = true;
+  bool _touchDrawingEnabled = false;
 
   // Cloud sync settings
   final CloudSyncService _cloudSync = CloudSyncService.instance;
@@ -53,6 +57,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _autoSaveDelay = settings.autoSaveDelay;
       _defaultTemplate = _templateToString(settings.defaultTemplate);
       _showDebugOverlay = settings.showDebugOverlay;
+      _twoFingerGestureMode = settings.twoFingerGestureMode;
+      _palmRejectionEnabled = settings.palmRejectionEnabled;
+      _touchDrawingEnabled = settings.touchDrawingEnabled;
     });
   }
 
@@ -129,6 +136,47 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
             ),
+          ),
+
+          const Divider(),
+
+          // Gesture Settings Section
+          _buildSectionHeader('제스처 설정'),
+          ListTile(
+            leading: const Icon(Icons.touch_app),
+            title: const Text('두 손가락 제스처'),
+            subtitle: Text(_twoFingerGestureMode == 'zoom' ? '확대/축소' : '스크롤'),
+            trailing: SegmentedButton<String>(
+              segments: const [
+                ButtonSegment<String>(value: 'zoom', label: Text('줌')),
+                ButtonSegment<String>(value: 'scroll', label: Text('스크롤')),
+              ],
+              selected: {_twoFingerGestureMode},
+              onSelectionChanged: (Set<String> newSelection) async {
+                setState(() => _twoFingerGestureMode = newSelection.first);
+                await SettingsService.instance.setTwoFingerGestureMode(newSelection.first);
+              },
+            ),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.pan_tool),
+            title: const Text('손바닥 무시'),
+            subtitle: const Text('펜 사용 시 손바닥 터치 무시'),
+            value: _palmRejectionEnabled,
+            onChanged: (value) async {
+              setState(() => _palmRejectionEnabled = value);
+              await SettingsService.instance.setPalmRejectionEnabled(value);
+            },
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.fingerprint),
+            title: const Text('손으로 그리기'),
+            subtitle: const Text('펜 없이 손가락으로 그리기 허용'),
+            value: _touchDrawingEnabled,
+            onChanged: (value) async {
+              setState(() => _touchDrawingEnabled = value);
+              await SettingsService.instance.setTouchDrawingEnabled(value);
+            },
           ),
 
           const Divider(),

@@ -47,6 +47,14 @@ class QuickToolbar extends StatefulWidget {
   // 패널 상태 콜백 (캔버스 터치 시 패널 닫기 위해)
   // 패널이 열릴 때 닫기 콜백을 부모에게 전달
   final void Function(VoidCallback closeCallback)? onPanelOpened;
+  // Undo/Redo/Save/Clear 콜백
+  final VoidCallback? onUndo;
+  final VoidCallback? onRedo;
+  final VoidCallback? onSave;
+  final VoidCallback? onClear;
+  final bool canUndo;
+  final bool canRedo;
+  final bool hasChanges; // 저장되지 않은 변경사항 있음
 
   const QuickToolbar({
     super.key,
@@ -84,6 +92,13 @@ class QuickToolbar extends StatefulWidget {
     this.presentationHighlighterFadeSpeed = 1.0,
     this.onPresentationHighlighterFadeSpeedChanged,
     this.onPanelOpened,
+    this.onUndo,
+    this.onRedo,
+    this.onSave,
+    this.onClear,
+    this.canUndo = false,
+    this.canRedo = false,
+    this.hasChanges = false,
   });
 
   // Preset widths for pen (다양한 크기 프리셋)
@@ -240,6 +255,20 @@ class _QuickToolbarState extends State<QuickToolbar> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Undo/Redo buttons
+          _buildIconButton(
+            Icons.undo,
+            widget.canUndo ? widget.onUndo : null,
+            tooltip: '실행취소',
+            enabled: widget.canUndo,
+          ),
+          _buildIconButton(
+            Icons.redo,
+            widget.canRedo ? widget.onRedo : null,
+            tooltip: '다시실행',
+            enabled: widget.canRedo,
+          ),
+          _buildDivider(),
           // Drawing tools with dropdown menus
           _buildPenToolButton(context), // 펜 (색상 + 굵기)
           _buildHighlighterToolButton(context), // 형광펜 (색상 + 굵기 + 투명도)
@@ -276,7 +305,56 @@ class _QuickToolbarState extends State<QuickToolbar> {
 
           // Insert menu
           _buildInsertButton(context),
+          _buildDivider(),
+          // Save button (shows indicator when has unsaved changes)
+          _buildSaveButton(),
+          // Clear/Delete all button
+          _buildIconButton(
+            Icons.delete_sweep,
+            widget.onClear,
+            tooltip: '전체삭제',
+          ),
         ],
+      ),
+    );
+  }
+
+  /// 저장 버튼 (변경사항 있으면 강조 표시)
+  Widget _buildSaveButton() {
+    return Tooltip(
+      message: widget.hasChanges ? '저장 (변경사항 있음)' : '저장됨',
+      child: InkWell(
+        onTap: widget.hasChanges ? widget.onSave : null,
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: widget.hasChanges ? Colors.orange.withOpacity(0.1) : null,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Stack(
+            children: [
+              Icon(
+                widget.hasChanges ? Icons.save : Icons.check_circle_outline,
+                size: 20,
+                color: widget.hasChanges ? Colors.orange : Colors.green,
+              ),
+              if (widget.hasChanges)
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: Colors.orange,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -977,7 +1055,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
                 ),
                 Positioned(
                   left: buttonPosition.dx - 50,
-                  top: buttonPosition.dy - 120, // 버튼 위쪽으로 팝업 표시
+                  top: buttonPosition.dy + 40, // 툴바 아래로 팝업 표시
                   child: Material(
                     elevation: 8,
                     borderRadius: BorderRadius.circular(12),
@@ -1199,7 +1277,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
           // 패널
           Positioned(
             left: position.dx - 40,
-            top: position.dy - 120,
+            top: position.dy + 40, // 툴바 아래로 패널 표시
             child: Material(
               elevation: 8,
               borderRadius: BorderRadius.circular(12),
@@ -1730,7 +1808,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
   Widget build(BuildContext context) {
     return Positioned(
       left: widget.buttonPosition.dx - 50,
-      top: widget.buttonPosition.dy - 110, // 메인 툴바를 가리지 않도록 위로 이동
+      top: widget.buttonPosition.dy + 40, // 툴바 아래로 패널 표시
       child: Material(
         elevation: 8,
         borderRadius: BorderRadius.circular(12),
@@ -1939,7 +2017,7 @@ class _HighlighterPanelOverlayState extends State<_HighlighterPanelOverlay> {
   Widget build(BuildContext context) {
     return Positioned(
       left: widget.buttonPosition.dx - 100,
-      top: widget.buttonPosition.dy - 110,
+      top: widget.buttonPosition.dy + 40, // 툴바 아래로 패널 표시
       child: Material(
         elevation: 8,
         borderRadius: BorderRadius.circular(12),
@@ -2189,7 +2267,7 @@ class _EraserPanelOverlayState extends State<_EraserPanelOverlay> {
   Widget build(BuildContext context) {
     return Positioned(
       left: widget.buttonPosition.dx - 40,
-      top: widget.buttonPosition.dy - 90,
+      top: widget.buttonPosition.dy + 40, // 툴바 아래로 패널 표시
       child: Material(
         elevation: 8,
         borderRadius: BorderRadius.circular(12),

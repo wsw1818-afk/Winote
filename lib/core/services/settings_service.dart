@@ -187,4 +187,28 @@ class SettingsService {
     _settings['showDebugOverlay'] = show;
     await _save();
   }
+
+  // Two-finger gesture mode: 'zoom' (default) or 'scroll'
+  String get twoFingerGestureMode => _settings['twoFingerGestureMode'] as String? ?? 'zoom';
+
+  Future<void> setTwoFingerGestureMode(String mode) async {
+    _settings['twoFingerGestureMode'] = mode;
+    await _save();
+  }
+
+  // Palm rejection (손바닥 무시)
+  bool get palmRejectionEnabled => _settings['palmRejectionEnabled'] as bool? ?? true;
+
+  Future<void> setPalmRejectionEnabled(bool enabled) async {
+    _settings['palmRejectionEnabled'] = enabled;
+    await _save();
+  }
+
+  // Touch drawing enabled (손으로 그리기 허용)
+  bool get touchDrawingEnabled => _settings['touchDrawingEnabled'] as bool? ?? false;
+
+  Future<void> setTouchDrawingEnabled(bool enabled) async {
+    _settings['touchDrawingEnabled'] = enabled;
+    await _save();
+  }
 }
