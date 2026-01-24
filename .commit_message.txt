@@ -1,1 +1,1 @@
-✨ 대규모 품질 개선: 적응형 스트로크 스무딩 + 래스터 캐싱 + PDF 서비스 추가
+🔥 중복 pdf_service.dart 삭제 (이미 pdf_export_service, pdf_import_service 존재)
