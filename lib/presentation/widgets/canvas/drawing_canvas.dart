@@ -2223,6 +2223,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       strokeColor = widget.strokeColor.withOpacity(widget.highlighterOpacity);
     }
 
+    // 스무딩 서비스 초기화 (속도 버퍼 클리어)
+    _smoothingService.beginStroke();
+
     _currentStroke = Stroke(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       toolType: widget.toolType,

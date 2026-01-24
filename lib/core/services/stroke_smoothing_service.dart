@@ -9,10 +9,11 @@ enum SmoothingLevel {
   strong,  // 강하게 (악필 교정)
 }
 
-/// 스트로크 스무딩 서비스
+/// 스트로크 스무딩 서비스 (개선 버전)
+/// - 속도 기반 적응형 스무딩
+/// - 베지어 커브 피팅
+/// - 필압 감도 보정
 /// - 떨림 제거 (Jitter removal)
-/// - 곡선 부드럽게 (Curve smoothing)
-/// - 속도 기반 적응형 보정
 class StrokeSmoothingService {
   static final StrokeSmoothingService instance = StrokeSmoothingService._();
   StrokeSmoothingService._();
@@ -22,6 +23,10 @@ class StrokeSmoothingService {
   SmoothingLevel get level => _level;
   set level(SmoothingLevel value) => _level = value;
 
+  /// 속도 추적을 위한 버퍼
+  final List<_VelocityPoint> _velocityBuffer = [];
+  static const int _velocityBufferSize = 5;
+
   /// 보정 강도별 파라미터
   Map<SmoothingLevel, _SmoothingParams> get _params => {
     SmoothingLevel.none: _SmoothingParams(
@@ -29,36 +34,52 @@ class StrokeSmoothingService {
       smoothingFactor: 0,
       jitterThreshold: 0,
       cornerThreshold: 0,
+      velocitySmoothing: 0,
+      pressureSensitivity: 1.0,
     ),
     SmoothingLevel.light: _SmoothingParams(
-      minDistance: 1.5,
-      smoothingFactor: 0.2,
-      jitterThreshold: 2.0,
-      cornerThreshold: 60,
+      minDistance: 1.0,
+      smoothingFactor: 0.15,
+      jitterThreshold: 1.5,
+      cornerThreshold: 50,
+      velocitySmoothing: 0.2,
+      pressureSensitivity: 0.9,
     ),
     SmoothingLevel.medium: _SmoothingParams(
-      minDistance: 2.0,
-      smoothingFactor: 0.35,
-      jitterThreshold: 3.0,
-      cornerThreshold: 45,
+      minDistance: 1.5,
+      smoothingFactor: 0.25,
+      jitterThreshold: 2.5,
+      cornerThreshold: 40,
+      velocitySmoothing: 0.35,
+      pressureSensitivity: 0.8,
     ),
     SmoothingLevel.strong: _SmoothingParams(
-      minDistance: 3.0,
-      smoothingFactor: 0.5,
-      jitterThreshold: 5.0,
+      minDistance: 2.0,
+      smoothingFactor: 0.4,
+      jitterThreshold: 4.0,
       cornerThreshold: 30,
+      velocitySmoothing: 0.5,
+      pressureSensitivity: 0.7,
     ),
   };
 
+  /// 스트로크 시작 시 버퍼 초기화
+  void beginStroke() {
+    _velocityBuffer.clear();
+  }
+
   /// 실시간 포인트 필터링 (입력 시점에 적용)
-  /// 이전 포인트와 비교하여 떨림/노이즈 제거
+  /// 속도 기반 적응형 스무딩 적용
   StrokePoint? filterPoint(StrokePoint newPoint, List<StrokePoint> existingPoints) {
     if (_level == SmoothingLevel.none) return newPoint;
 
     final params = _params[_level]!;
 
     // 첫 번째 포인트는 그대로 반환
-    if (existingPoints.isEmpty) return newPoint;
+    if (existingPoints.isEmpty) {
+      _addToVelocityBuffer(newPoint, 0);
+      return newPoint;
+    }
 
     final lastPoint = existingPoints.last;
     final distance = _distance(newPoint, lastPoint);
@@ -68,35 +89,103 @@ class StrokeSmoothingService {
       return null;
     }
 
-    // Jitter threshold: 너무 가까운 포인트는 평균화
+    // 속도 계산
+    final timeDelta = newPoint.timestamp - lastPoint.timestamp;
+    final velocity = timeDelta > 0 ? distance / timeDelta * 1000 : 0.0; // px/sec
+    _addToVelocityBuffer(newPoint, velocity);
+
+    // 평균 속도 계산
+    final avgVelocity = _getAverageVelocity();
+
+    // 속도 기반 적응형 스무딩 계수 계산
+    // 빠른 속도 = 적은 스무딩, 느린 속도 = 많은 스무딩
+    final adaptiveFactor = _calculateAdaptiveSmoothingFactor(
+      avgVelocity,
+      params.smoothingFactor,
+      params.velocitySmoothing,
+    );
+
+    // Jitter threshold: 너무 가까운 포인트는 방향 변화 확인
     if (distance < params.jitterThreshold && existingPoints.length >= 2) {
       final prevPoint = existingPoints[existingPoints.length - 2];
-
-      // 방향 변화 감지
       final angle = _angleBetween(prevPoint, lastPoint, newPoint);
 
-      // 급격한 방향 변화가 아니면 스무딩 적용
+      // 급격한 방향 변화(코너)가 아니면 강한 스무딩
       if (angle > params.cornerThreshold) {
-        return _smoothPoint(newPoint, existingPoints, params.smoothingFactor);
+        return _smoothPointAdaptive(newPoint, existingPoints, adaptiveFactor * 1.5, params);
       }
     }
 
     // 스무딩 적용
-    return _smoothPoint(newPoint, existingPoints, params.smoothingFactor);
+    return _smoothPointAdaptive(newPoint, existingPoints, adaptiveFactor, params);
   }
 
-  /// 포인트 스무딩 (가중 이동 평균)
-  StrokePoint _smoothPoint(StrokePoint newPoint, List<StrokePoint> existing, double factor) {
+  /// 속도 버퍼에 추가
+  void _addToVelocityBuffer(StrokePoint point, double velocity) {
+    _velocityBuffer.add(_VelocityPoint(point, velocity));
+    if (_velocityBuffer.length > _velocityBufferSize) {
+      _velocityBuffer.removeAt(0);
+    }
+  }
+
+  /// 평균 속도 계산
+  double _getAverageVelocity() {
+    if (_velocityBuffer.isEmpty) return 0;
+    final sum = _velocityBuffer.fold<double>(0, (sum, vp) => sum + vp.velocity);
+    return sum / _velocityBuffer.length;
+  }
+
+  /// 적응형 스무딩 계수 계산
+  double _calculateAdaptiveSmoothingFactor(
+    double velocity,
+    double baseFactor,
+    double velocitySensitivity,
+  ) {
+    // 속도 정규화 (0~1500 px/sec 범위를 0~1로)
+    final normalizedVelocity = (velocity / 1500).clamp(0.0, 1.0);
+
+    // 빠른 필기 = 적은 스무딩 (반응성 유지)
+    // 느린 필기 = 많은 스무딩 (떨림 제거)
+    final velocityMultiplier = 1.0 - (normalizedVelocity * velocitySensitivity);
+
+    return (baseFactor * velocityMultiplier).clamp(0.05, 0.6);
+  }
+
+  /// 적응형 포인트 스무딩
+  StrokePoint _smoothPointAdaptive(
+    StrokePoint newPoint,
+    List<StrokePoint> existing,
+    double factor,
+    _SmoothingParams params,
+  ) {
     if (existing.isEmpty || factor == 0) return newPoint;
 
     final lastPoint = existing.last;
 
-    // Exponential smoothing
-    final smoothedX = lastPoint.x + (newPoint.x - lastPoint.x) * (1 - factor);
-    final smoothedY = lastPoint.y + (newPoint.y - lastPoint.y) * (1 - factor);
+    // Quadratic smoothing for better curve quality
+    double smoothedX, smoothedY;
 
-    // 필압도 약간 스무딩
-    final smoothedPressure = lastPoint.pressure * factor + newPoint.pressure * (1 - factor);
+    if (existing.length >= 2) {
+      // 3점 가중 평균 (더 부드러운 곡선)
+      final prevPoint = existing[existing.length - 2];
+      final weight1 = 0.15 * factor; // 이전 포인트 가중치
+      final weight2 = 0.35 * factor; // 마지막 포인트 가중치
+      final weight3 = 1.0 - weight1 - weight2; // 새 포인트 가중치
+
+      smoothedX = prevPoint.x * weight1 + lastPoint.x * weight2 + newPoint.x * weight3;
+      smoothedY = prevPoint.y * weight1 + lastPoint.y * weight2 + newPoint.y * weight3;
+    } else {
+      // 2점 선형 보간
+      smoothedX = lastPoint.x + (newPoint.x - lastPoint.x) * (1 - factor);
+      smoothedY = lastPoint.y + (newPoint.y - lastPoint.y) * (1 - factor);
+    }
+
+    // 필압 스무딩 (덜 민감하게)
+    final smoothedPressure = _smoothPressure(
+      newPoint.pressure,
+      existing,
+      params.pressureSensitivity,
+    );
 
     return StrokePoint(
       x: smoothedX,
@@ -107,11 +196,26 @@ class StrokeSmoothingService {
     );
   }
 
-  /// 완성된 스트로크 후처리 (선택적)
-  /// Ramer-Douglas-Peucker 알고리즘으로 불필요한 포인트 제거 후
+  /// 필압 스무딩
+  double _smoothPressure(double newPressure, List<StrokePoint> existing, double sensitivity) {
+    if (existing.isEmpty) return newPressure;
+
+    // 최근 3개 포인트의 필압 평균
+    final count = math.min(3, existing.length);
+    double sum = newPressure;
+    for (int i = 0; i < count; i++) {
+      sum += existing[existing.length - 1 - i].pressure;
+    }
+    final avgPressure = sum / (count + 1);
+
+    // 감도에 따라 원본과 평균 사이 보간
+    return newPressure * sensitivity + avgPressure * (1 - sensitivity);
+  }
+
+  /// 완성된 스트로크 후처리
   /// Bezier 스플라인으로 부드럽게 재구성
   List<StrokePoint> smoothStroke(List<StrokePoint> points) {
-    if (_level == SmoothingLevel.none || points.length < 3) {
+    if (_level == SmoothingLevel.none || points.length < 4) {
       return points;
     }
 
@@ -120,10 +224,75 @@ class StrokeSmoothingService {
     // 1단계: RDP 알고리즘으로 포인트 단순화
     final simplified = _rdpSimplify(points, params.minDistance);
 
-    // 2단계: 이동 평균 스무딩
-    final smoothed = _movingAverageSmooth(simplified, _getWindowSize());
+    if (simplified.length < 4) {
+      return _movingAverageSmooth(simplified, 3);
+    }
 
-    return smoothed;
+    // 2단계: Catmull-Rom 스플라인 보간
+    final interpolated = _catmullRomInterpolate(simplified, 3);
+
+    // 3단계: 최종 이동 평균 스무딩
+    return _movingAverageSmooth(interpolated, _getWindowSize());
+  }
+
+  /// Catmull-Rom 스플라인 보간
+  List<StrokePoint> _catmullRomInterpolate(List<StrokePoint> points, int subdivisions) {
+    if (points.length < 4) return points;
+
+    final result = <StrokePoint>[];
+
+    for (int i = 0; i < points.length - 1; i++) {
+      final p0 = points[math.max(0, i - 1)];
+      final p1 = points[i];
+      final p2 = points[math.min(points.length - 1, i + 1)];
+      final p3 = points[math.min(points.length - 1, i + 2)];
+
+      for (int j = 0; j < subdivisions; j++) {
+        final t = j / subdivisions;
+        final point = _catmullRomPoint(p0, p1, p2, p3, t);
+        result.add(point);
+      }
+    }
+
+    // 마지막 포인트 추가
+    result.add(points.last);
+
+    return result;
+  }
+
+  /// Catmull-Rom 포인트 계산
+  StrokePoint _catmullRomPoint(
+    StrokePoint p0,
+    StrokePoint p1,
+    StrokePoint p2,
+    StrokePoint p3,
+    double t,
+  ) {
+    final t2 = t * t;
+    final t3 = t2 * t;
+
+    // Catmull-Rom 계수
+    final x = 0.5 * ((2 * p1.x) +
+        (-p0.x + p2.x) * t +
+        (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+        (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+
+    final y = 0.5 * ((2 * p1.y) +
+        (-p0.y + p2.y) * t +
+        (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
+        (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+
+    // 압력과 타임스탬프는 선형 보간
+    final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
+    final timestamp = (p1.timestamp + (p2.timestamp - p1.timestamp) * t).round();
+
+    return StrokePoint(
+      x: x,
+      y: y,
+      pressure: pressure,
+      tilt: p1.tilt,
+      timestamp: timestamp,
+    );
   }
 
   /// 보정 강도에 따른 윈도우 크기
@@ -140,19 +309,16 @@ class StrokeSmoothingService {
     }
   }
 
-  /// Ramer-Douglas-Peucker 알고리즘 (점 단순화) - 반복적 구현으로 스택 오버플로우 방지 및 성능 개선
+  /// Ramer-Douglas-Peucker 알고리즘 (점 단순화) - 반복적 구현
   List<StrokePoint> _rdpSimplify(List<StrokePoint> points, double epsilon) {
     if (points.length < 3) return List.from(points);
 
-    // 매우 긴 스트로크는 먼저 샘플링하여 처리 시간 단축
+    // 매우 긴 스트로크는 먼저 샘플링
     final workingPoints = points.length > 500
         ? _samplePoints(points, 500)
         : points;
 
-    // 결과에 포함할 인덱스를 저장할 Set (중복 방지)
     final keepIndices = <int>{0, workingPoints.length - 1};
-
-    // 처리할 구간을 저장할 스택 (시작 인덱스, 끝 인덱스)
     final stack = <(int, int)>[(0, workingPoints.length - 1)];
 
     while (stack.isNotEmpty) {
@@ -160,7 +326,6 @@ class StrokeSmoothingService {
 
       if (endIdx - startIdx < 2) continue;
 
-      // 가장 먼 점 찾기
       double maxDistance = 0;
       int maxIndex = startIdx;
 
@@ -175,7 +340,6 @@ class StrokeSmoothingService {
         }
       }
 
-      // 임계값보다 크면 해당 점을 유지하고 양쪽 구간을 스택에 추가
       if (maxDistance > epsilon) {
         keepIndices.add(maxIndex);
         stack.add((startIdx, maxIndex));
@@ -183,12 +347,11 @@ class StrokeSmoothingService {
       }
     }
 
-    // 정렬된 인덱스 순서로 포인트 추출
     final sortedIndices = keepIndices.toList()..sort();
     return sortedIndices.map((i) => workingPoints[i]).toList();
   }
 
-  /// 포인트 샘플링 (매우 긴 스트로크 처리 최적화)
+  /// 포인트 샘플링
   List<StrokePoint> _samplePoints(List<StrokePoint> points, int targetCount) {
     if (points.length <= targetCount) return points;
 
@@ -234,29 +397,32 @@ class StrokeSmoothingService {
     final halfWindow = windowSize ~/ 2;
 
     for (int i = 0; i < points.length; i++) {
-      // 시작과 끝 부분은 그대로 유지 (필기 시작/끝점 보존)
+      // 시작과 끝 부분은 그대로 유지
       if (i < halfWindow || i >= points.length - halfWindow) {
         result.add(points[i]);
         continue;
       }
 
-      // 윈도우 내 평균 계산
-      double sumX = 0, sumY = 0, sumPressure = 0;
-      int count = 0;
+      // 가우시안 가중 평균 (중심에 높은 가중치)
+      double sumX = 0, sumY = 0, sumPressure = 0, totalWeight = 0;
 
       for (int j = i - halfWindow; j <= i + halfWindow; j++) {
         if (j >= 0 && j < points.length) {
-          sumX += points[j].x;
-          sumY += points[j].y;
-          sumPressure += points[j].pressure;
-          count++;
+          // 가우시안 가중치
+          final distance = (j - i).abs();
+          final weight = math.exp(-distance * distance / (2 * halfWindow * halfWindow));
+
+          sumX += points[j].x * weight;
+          sumY += points[j].y * weight;
+          sumPressure += points[j].pressure * weight;
+          totalWeight += weight;
         }
       }
 
       result.add(StrokePoint(
-        x: sumX / count,
-        y: sumY / count,
-        pressure: sumPressure / count,
+        x: sumX / totalWeight,
+        y: sumY / totalWeight,
+        pressure: sumPressure / totalWeight,
         tilt: points[i].tilt,
         timestamp: points[i].timestamp,
       ));
@@ -292,8 +458,7 @@ class StrokeSmoothingService {
   bool get shapeRecognitionEnabled => _shapeRecognitionEnabled;
   set shapeRecognitionEnabled(bool value) => _shapeRecognitionEnabled = value;
 
-  /// 도형 인식이 적용된 스트로크 반환 (직선/원 자동 교정)
-  /// 원본 스트로크와 인식된 도형 타입을 함께 반환
+  /// 도형 인식이 적용된 스트로크 반환
   (List<StrokePoint>, String?) recognizeAndCorrectShape(List<StrokePoint> points) {
     if (!_shapeRecognitionEnabled || points.length < 5) {
       return (points, null);
@@ -312,22 +477,19 @@ class StrokeSmoothingService {
     return (points, null);
   }
 
-  /// 직선 여부 판정 (선형 회귀로 R² 계산)
+  /// 직선 여부 판정
   bool _isLikelyLine(List<StrokePoint> points) {
     if (points.length < 3) return false;
 
-    // 시작점과 끝점 거리
     final startEnd = _distance(points.first, points.last);
-    if (startEnd < 30) return false; // 너무 짧은 스트로크는 제외
+    if (startEnd < 30) return false;
 
-    // 모든 포인트의 직선으로부터의 평균 거리 계산
     double totalDeviation = 0;
     for (final point in points) {
       totalDeviation += _perpendicularDistance(point, points.first, points.last);
     }
     final avgDeviation = totalDeviation / points.length;
 
-    // 평균 편차가 선 길이의 5% 이하면 직선으로 인식
     return avgDeviation < startEnd * 0.05;
   }
 
@@ -338,7 +500,6 @@ class StrokeSmoothingService {
     final start = points.first;
     final end = points.last;
 
-    // 시작점과 끝점만 유지 (직선)
     return [
       start,
       StrokePoint(
@@ -351,7 +512,7 @@ class StrokeSmoothingService {
     ];
   }
 
-  /// 닫힌 도형 여부 (시작점과 끝점이 가까움)
+  /// 닫힌 도형 여부
   bool _isLikelyClosed(List<StrokePoint> points) {
     if (points.length < 10) return false;
 
@@ -359,21 +520,18 @@ class StrokeSmoothingService {
     final end = points.last;
     final distance = _distance(start, end);
 
-    // 전체 경로 길이 계산
     double totalLength = 0;
     for (int i = 1; i < points.length; i++) {
       totalLength += _distance(points[i - 1], points[i]);
     }
 
-    // 시작-끝 거리가 전체 길이의 15% 이하면 닫힌 도형
     return distance < totalLength * 0.15;
   }
 
-  /// 원 여부 판정 (중심점으로부터의 거리 분산 체크)
+  /// 원 여부 판정
   bool _isLikelyCircle(List<StrokePoint> points) {
     if (points.length < 10) return false;
 
-    // 바운딩 박스로 중심점 계산
     double minX = double.infinity, maxX = double.negativeInfinity;
     double minY = double.infinity, maxY = double.negativeInfinity;
 
@@ -388,9 +546,8 @@ class StrokeSmoothingService {
     final centerY = (minY + maxY) / 2;
     final avgRadius = ((maxX - minX) + (maxY - minY)) / 4;
 
-    if (avgRadius < 20) return false; // 너무 작은 원은 제외
+    if (avgRadius < 20) return false;
 
-    // 각 포인트의 중심으로부터의 거리 분산 계산
     double sumSquaredDiff = 0;
     for (final p in points) {
       final dist = math.sqrt(math.pow(p.x - centerX, 2) + math.pow(p.y - centerY, 2));
@@ -399,7 +556,6 @@ class StrokeSmoothingService {
     final variance = sumSquaredDiff / points.length;
     final stdDev = math.sqrt(variance);
 
-    // 표준편차가 평균 반지름의 15% 이하면 원으로 인식
     return stdDev < avgRadius * 0.15;
   }
 
@@ -407,7 +563,6 @@ class StrokeSmoothingService {
   List<StrokePoint> _correctToEllipse(List<StrokePoint> points) {
     if (points.isEmpty) return points;
 
-    // 바운딩 박스로 타원 파라미터 계산
     double minX = double.infinity, maxX = double.negativeInfinity;
     double minY = double.infinity, maxY = double.negativeInfinity;
 
@@ -423,7 +578,6 @@ class StrokeSmoothingService {
     final radiusX = (maxX - minX) / 2;
     final radiusY = (maxY - minY) / 2;
 
-    // 타원 위의 점들 생성 (36개 포인트)
     final result = <StrokePoint>[];
     final avgPressure = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
 
@@ -442,17 +596,29 @@ class StrokeSmoothingService {
   }
 }
 
+/// 속도 추적용 포인트
+class _VelocityPoint {
+  final StrokePoint point;
+  final double velocity;
+
+  _VelocityPoint(this.point, this.velocity);
+}
+
 /// 스무딩 파라미터
 class _SmoothingParams {
-  final double minDistance;      // 최소 포인트 간격
-  final double smoothingFactor;  // 스무딩 강도 (0~1)
-  final double jitterThreshold;  // 떨림 감지 임계값
-  final double cornerThreshold;  // 코너 감지 각도 (도)
+  final double minDistance;        // 최소 포인트 간격
+  final double smoothingFactor;    // 기본 스무딩 강도 (0~1)
+  final double jitterThreshold;    // 떨림 감지 임계값
+  final double cornerThreshold;    // 코너 감지 각도 (도)
+  final double velocitySmoothing;  // 속도 기반 스무딩 민감도
+  final double pressureSensitivity; // 필압 민감도
 
   _SmoothingParams({
     required this.minDistance,
     required this.smoothingFactor,
     required this.jitterThreshold,
     required this.cornerThreshold,
+    required this.velocitySmoothing,
+    required this.pressureSensitivity,
   });
 }
