@@ -14,6 +14,7 @@ class NotePage {
   final String? backgroundImagePath; // 커스텀 배경 이미지 경로 (Canva 등에서 가져온 이미지)
   final int? templateIndex; // PageTemplate enum index (저장용)
   final int? overlayTemplateIndex; // 배경 이미지 위에 표시할 템플릿 (lined, grid, dotted 등)
+  final bool isBookmarked; // 책갈피 여부
 
   NotePage({
     required this.pageNumber,
@@ -22,6 +23,7 @@ class NotePage {
     this.backgroundImagePath,
     this.templateIndex,
     this.overlayTemplateIndex,
+    this.isBookmarked = false,
   });
 
   Map<String, dynamic> toJson() {
@@ -32,6 +34,7 @@ class NotePage {
       if (backgroundImagePath != null) 'backgroundImagePath': backgroundImagePath,
       if (templateIndex != null) 'templateIndex': templateIndex,
       if (overlayTemplateIndex != null) 'overlayTemplateIndex': overlayTemplateIndex,
+      if (isBookmarked) 'isBookmarked': isBookmarked,
     };
   }
 
@@ -49,6 +52,7 @@ class NotePage {
       backgroundImagePath: json['backgroundImagePath'] as String?,
       templateIndex: json['templateIndex'] as int?,
       overlayTemplateIndex: json['overlayTemplateIndex'] as int?,
+      isBookmarked: json['isBookmarked'] as bool? ?? false,
     );
   }
 
@@ -62,6 +66,7 @@ class NotePage {
     bool clearTemplateIndex = false,
     int? overlayTemplateIndex,
     bool clearOverlayTemplateIndex = false,
+    bool? isBookmarked,
   }) {
     return NotePage(
       pageNumber: pageNumber ?? this.pageNumber,
@@ -70,6 +75,7 @@ class NotePage {
       backgroundImagePath: clearBackgroundImage ? null : (backgroundImagePath ?? this.backgroundImagePath),
       templateIndex: clearTemplateIndex ? null : (templateIndex ?? this.templateIndex),
       overlayTemplateIndex: clearOverlayTemplateIndex ? null : (overlayTemplateIndex ?? this.overlayTemplateIndex),
+      isBookmarked: isBookmarked ?? this.isBookmarked,
     );
   }
 
@@ -367,6 +373,105 @@ class Note {
 
     return copyWith(
       pages: newPages,
+      modifiedAt: DateTime.now(),
+    );
+  }
+
+  /// Toggle bookmark for a specific page
+  Note togglePageBookmark(int pageNumber) {
+    final newPages = <NotePage>[];
+    bool pageFound = false;
+
+    for (final page in pages) {
+      if (page.pageNumber == pageNumber) {
+        newPages.add(page.copyWith(isBookmarked: !page.isBookmarked));
+        pageFound = true;
+      } else {
+        newPages.add(page);
+      }
+    }
+
+    if (!pageFound) {
+      return this;
+    }
+
+    return copyWith(
+      pages: newPages,
+      modifiedAt: DateTime.now(),
+    );
+  }
+
+  /// Get bookmarked pages
+  List<NotePage> get bookmarkedPages {
+    return pages.where((p) => p.isBookmarked).toList();
+  }
+
+  /// Check if a page is bookmarked
+  bool isPageBookmarked(int pageNumber) {
+    final page = pages.firstWhere(
+      (p) => p.pageNumber == pageNumber,
+      orElse: () => NotePage(pageNumber: pageNumber, strokes: []),
+    );
+    return page.isBookmarked;
+  }
+
+  /// Duplicate a page
+  Note duplicatePage(int pageNumber) {
+    final sourcePage = pages.firstWhere(
+      (p) => p.pageNumber == pageNumber,
+      orElse: () => NotePage(pageNumber: pageNumber, strokes: []),
+    );
+
+    // Find the max page number
+    final maxPageNumber = pages.isEmpty
+        ? -1
+        : pages.map((p) => p.pageNumber).reduce((a, b) => a > b ? a : b);
+
+    // Create a new page with copied content
+    final newPage = NotePage(
+      pageNumber: maxPageNumber + 1,
+      strokes: sourcePage.strokes.map((s) => Stroke(
+        id: '${DateTime.now().millisecondsSinceEpoch}_${s.id}',
+        toolType: s.toolType,
+        color: s.color,
+        width: s.width,
+        points: s.points.toList(),
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        isShape: s.isShape,
+        shapeType: s.shapeType,
+      )).toList(),
+      shapes: sourcePage.shapes.toList(),
+      backgroundImagePath: sourcePage.backgroundImagePath,
+      templateIndex: sourcePage.templateIndex,
+      overlayTemplateIndex: sourcePage.overlayTemplateIndex,
+      isBookmarked: false, // 복제된 페이지는 책갈피 없음
+    );
+
+    return copyWith(
+      pages: [...pages, newPage],
+      modifiedAt: DateTime.now(),
+    );
+  }
+
+  /// Reorder pages (move page from oldIndex to newIndex)
+  Note reorderPages(int oldIndex, int newIndex) {
+    if (oldIndex < 0 || oldIndex >= pages.length ||
+        newIndex < 0 || newIndex >= pages.length) {
+      return this;
+    }
+
+    final newPages = List<NotePage>.from(pages);
+    final page = newPages.removeAt(oldIndex);
+    newPages.insert(newIndex, page);
+
+    // Update page numbers to match new order
+    final updatedPages = <NotePage>[];
+    for (int i = 0; i < newPages.length; i++) {
+      updatedPages.add(newPages[i].copyWith(pageNumber: i));
+    }
+
+    return copyWith(
+      pages: updatedPages,
       modifiedAt: DateTime.now(),
     );
   }

@@ -269,10 +269,13 @@ class _QuickToolbarState extends State<QuickToolbar> {
             enabled: widget.canRedo,
           ),
           _buildDivider(),
+          // Pen presets (펜 프리셋)
+          _buildPenPresetsButton(context),
+          _buildDivider(),
           // Drawing tools with dropdown menus
           _buildPenToolButton(context), // 펜 (색상 + 굵기)
           _buildHighlighterToolButton(context), // 형광펜 (색상 + 굵기 + 투명도)
-          _buildEraserToolButton(context), // 지우개 (굵기)
+          _buildEraserToolButton(context), // 지우개 (굵기 + 영역 지우개)
           _buildToolButton(DrawingTool.lasso, Icons.gesture, '올가미'),
           _buildLaserPointerToolButton(context),
           _buildPresentationHighlighterToolButton(context),
@@ -688,6 +691,275 @@ class _QuickToolbarState extends State<QuickToolbar> {
     }
   }
 
+  /// 펜 프리셋 버튼 (저장된 펜 설정 빠른 적용)
+  Widget _buildPenPresetsButton(BuildContext context) {
+    return Tooltip(
+      message: '펜 프리셋',
+      child: InkWell(
+        onTap: () => _showPenPresetsPanel(context),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: Colors.grey[100],
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Icon(Icons.bookmarks, size: 20, color: Colors.blueGrey),
+        ),
+      ),
+    );
+  }
+
+  void _showPenPresetsPanel(BuildContext context) {
+    final RenderBox button = context.findRenderObject() as RenderBox;
+    final buttonPosition = button.localToGlobal(Offset.zero);
+
+    _closeOverlay();
+
+    final overlay = Overlay.of(context);
+    _currentOverlay = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          // 배경 탭 시 닫기
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: _closeOverlay,
+              behavior: HitTestBehavior.translucent,
+              child: Container(color: Colors.transparent),
+            ),
+          ),
+          // 프리셋 패널 (축소 버전)
+          Positioned(
+            left: buttonPosition.dx - 40,
+            top: buttonPosition.dy + 40,
+            child: Material(
+              elevation: 8,
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                width: 220,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          '펜 프리셋',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+                        ),
+                        // 현재 펜 저장 버튼
+                        TextButton.icon(
+                          onPressed: () => _saveCurrentPenAsPreset(),
+                          icon: const Icon(Icons.add, size: 12),
+                          label: const Text('현재 펜 저장', style: TextStyle(fontSize: 10)),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    // 프리셋 목록
+                    ..._settings.penPresets.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final preset = entry.value;
+                      final color = Color(preset['color'] as int);
+                      final width = (preset['width'] as num).toDouble();
+                      final name = preset['name'] as String;
+                      final toolType = preset['toolType'] as String? ?? 'pen';
+
+                      return InkWell(
+                        onTap: () {
+                          // 프리셋 적용
+                          if (toolType == 'highlighter') {
+                            widget.onToolChanged(DrawingTool.highlighter);
+                            widget.onHighlighterColorChanged(color);
+                            widget.onHighlighterWidthChanged(width);
+                          } else {
+                            widget.onToolChanged(DrawingTool.pen);
+                            widget.onColorChanged(color);
+                            widget.onWidthChanged(width);
+                          }
+                          _closeOverlay();
+                        },
+                        onLongPress: () {
+                          // 길게 눌러서 삭제
+                          _showDeletePresetDialog(index, name);
+                        },
+                        borderRadius: BorderRadius.circular(6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                          margin: const EdgeInsets.only(bottom: 3),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[50],
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: Colors.grey[200]!),
+                          ),
+                          child: Row(
+                            children: [
+                              // 색상 미리보기
+                              Container(
+                                width: 18,
+                                height: 18,
+                                decoration: BoxDecoration(
+                                  color: toolType == 'highlighter'
+                                      ? color.withOpacity(0.4)
+                                      : color,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: Colors.grey[300]!),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              // 이름
+                              Expanded(
+                                child: Text(
+                                  name,
+                                  style: const TextStyle(fontSize: 10),
+                                ),
+                              ),
+                              // 굵기 미리보기
+                              Container(
+                                width: 30,
+                                height: width.clamp(2.0, 14.0),
+                                decoration: BoxDecoration(
+                                  color: color,
+                                  borderRadius: BorderRadius.circular(width / 2),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              // 도구 타입 아이콘
+                              Icon(
+                                toolType == 'highlighter'
+                                    ? Icons.brush
+                                    : Icons.edit,
+                                size: 12,
+                                color: Colors.grey[500],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                    if (_settings.penPresets.isEmpty)
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        child: const Text(
+                          '저장된 프리셋이 없습니다.\n"현재 펜 저장"을 눌러 추가하세요.',
+                          style: TextStyle(color: Colors.grey, fontSize: 10),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    const Divider(height: 10),
+                    Text(
+                      '💡 길게 눌러서 삭제 | 최대 5개',
+                      style: TextStyle(color: Colors.grey[500], fontSize: 9),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    overlay.insert(_currentOverlay!);
+    widget.onPanelOpened?.call(_closeOverlay);
+  }
+
+  void _saveCurrentPenAsPreset() {
+    final currentTool = widget.currentTool;
+    String toolType = 'pen';
+    Color color = widget.currentColor;
+    double width = widget.currentWidth;
+
+    if (currentTool == DrawingTool.highlighter) {
+      toolType = 'highlighter';
+      color = widget.highlighterColor;
+      width = widget.highlighterWidth;
+    }
+
+    // 이름 입력 다이얼로그
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        String presetName = toolType == 'highlighter' ? '형광펜' : '펜';
+        return AlertDialog(
+          title: const Text('프리셋 저장'),
+          content: TextField(
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: '프리셋 이름',
+              hintText: '예: 검정 펜, 빨강 형광펜',
+            ),
+            onChanged: (value) => presetName = value,
+            controller: TextEditingController(text: presetName),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('취소'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                await _settings.addPenPreset({
+                  'name': presetName,
+                  'color': color.value,
+                  'width': width,
+                  'toolType': toolType,
+                });
+                Navigator.pop(dialogContext);
+                _closeOverlay();
+                // 패널 다시 열어서 업데이트된 목록 보여주기
+                if (mounted) {
+                  setState(() {});
+                }
+              },
+              child: const Text('저장'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showDeletePresetDialog(int index, String name) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('프리셋 삭제'),
+        content: Text('"$name" 프리셋을 삭제하시겠습니까?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('취소'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () async {
+              await _settings.removePenPreset(index);
+              Navigator.pop(dialogContext);
+              _closeOverlay();
+              if (mounted) {
+                setState(() {});
+              }
+            },
+            child: const Text('삭제', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 펜 도구 버튼 (색상 + 굵기 가로 패널)
   Widget _buildPenToolButton(BuildContext context) {
     final isSelected = widget.currentTool == DrawingTool.pen;
@@ -834,23 +1106,28 @@ class _QuickToolbarState extends State<QuickToolbar> {
     ));
   }
 
-  /// 지우개 도구 버튼 (굵기 가로 패널)
+  /// 지우개 도구 버튼 (굵기 가로 패널 + 영역 지우개 포함)
   Widget _buildEraserToolButton(BuildContext context) {
-    final isSelected = widget.currentTool == DrawingTool.eraser;
+    final isEraserSelected = widget.currentTool == DrawingTool.eraser;
+    final isAreaEraserSelected = widget.currentTool == DrawingTool.areaEraser;
+    final isSelected = isEraserSelected || isAreaEraserSelected;
+    final highlightColor = isAreaEraserSelected ? Colors.red : Colors.blue;
 
     return Tooltip(
       message: '지우개',
       child: GestureDetector(
         onTap: () {
-          widget.onToolChanged(DrawingTool.eraser);
+          if (!isSelected) {
+            widget.onToolChanged(DrawingTool.eraser);
+          }
           _showEraserPanel(context);
         },
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.blue.withOpacity(0.1) : null,
+            color: isSelected ? highlightColor.withOpacity(0.1) : null,
             borderRadius: BorderRadius.circular(6),
-            border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
+            border: isSelected ? Border.all(color: highlightColor, width: 1.5) : null,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -859,27 +1136,28 @@ class _QuickToolbarState extends State<QuickToolbar> {
                 alignment: Alignment.center,
                 children: [
                   Icon(
-                    Icons.auto_fix_normal,
+                    isAreaEraserSelected ? Icons.select_all : Icons.auto_fix_normal,
                     size: 20,
-                    color: isSelected ? Colors.blue : Colors.grey[700],
+                    color: isSelected ? highlightColor : Colors.grey[700],
                   ),
-                  Positioned(
-                    bottom: 0,
-                    child: Container(
-                      width: 12,
-                      height: 3,
-                      decoration: BoxDecoration(
-                        color: Colors.orange,
-                        borderRadius: BorderRadius.circular(1),
+                  if (!isAreaEraserSelected)
+                    Positioned(
+                      bottom: 0,
+                      child: Container(
+                        width: 12,
+                        height: 3,
+                        decoration: BoxDecoration(
+                          color: Colors.orange,
+                          borderRadius: BorderRadius.circular(1),
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
               Icon(
                 Icons.arrow_drop_down,
                 size: 16,
-                color: isSelected ? Colors.blue : Colors.grey[700],
+                color: isSelected ? highlightColor : Colors.grey[700],
               ),
             ],
           ),
@@ -896,8 +1174,60 @@ class _QuickToolbarState extends State<QuickToolbar> {
         currentWidth: widget.eraserWidth,
         onWidthChanged: widget.onEraserWidthChanged,
         onClose: _closeOverlay,
+        currentTool: widget.currentTool,
+        onToolChanged: widget.onToolChanged,
       ),
     ));
+  }
+
+  /// 영역 지우개 도구 버튼
+  Widget _buildAreaEraserToolButton() {
+    final isSelected = widget.currentTool == DrawingTool.areaEraser;
+
+    return Tooltip(
+      message: '영역 지우개\n(선택 영역의 스트로크 전체 삭제)',
+      child: GestureDetector(
+        onTap: () {
+          widget.onToolChanged(DrawingTool.areaEraser);
+        },
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.red.withOpacity(0.1) : null,
+            borderRadius: BorderRadius.circular(6),
+            border: isSelected ? Border.all(color: Colors.red, width: 1.5) : null,
+          ),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Icon(
+                Icons.select_all,
+                size: 20,
+                color: isSelected ? Colors.red : Colors.grey[700],
+              ),
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 1),
+                  ),
+                  child: const Icon(
+                    Icons.close,
+                    size: 6,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildShapeToolButton(BuildContext context) {
@@ -2242,12 +2572,16 @@ class _EraserPanelOverlay extends StatefulWidget {
   final double currentWidth;
   final void Function(double) onWidthChanged;
   final VoidCallback onClose;
+  final DrawingTool currentTool;
+  final void Function(DrawingTool) onToolChanged;
 
   const _EraserPanelOverlay({
     required this.buttonPosition,
     required this.currentWidth,
     required this.onWidthChanged,
     required this.onClose,
+    required this.currentTool,
+    required this.onToolChanged,
   });
 
   @override
@@ -2256,15 +2590,20 @@ class _EraserPanelOverlay extends StatefulWidget {
 
 class _EraserPanelOverlayState extends State<_EraserPanelOverlay> {
   late double _localWidth;
+  late DrawingTool _localTool;
 
   @override
   void initState() {
     super.initState();
     _localWidth = widget.currentWidth;
+    _localTool = widget.currentTool;
   }
 
   @override
   Widget build(BuildContext context) {
+    final isEraserSelected = _localTool == DrawingTool.eraser;
+    final isAreaEraserSelected = _localTool == DrawingTool.areaEraser;
+
     return Positioned(
       left: widget.buttonPosition.dx - 40,
       top: widget.buttonPosition.dy + 40, // 툴바 아래로 패널 표시
@@ -2272,62 +2611,150 @@ class _EraserPanelOverlayState extends State<_EraserPanelOverlay> {
         elevation: 8,
         borderRadius: BorderRadius.circular(12),
         child: Container(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(12),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                '지우개 크기',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.grey[600],
-                ),
-              ),
-              const SizedBox(height: 8),
+              // 지우개 모드 선택
               Row(
                 mainAxisSize: MainAxisSize.min,
-                children: QuickToolbar.eraserWidths.map((width) {
-                  final isThisWidthSelected = (_localWidth - width).abs() < 0.5;
-                  return Tooltip(
-                    message: '${width.toInt()}px',
-                    child: Listener(
-                      behavior: HitTestBehavior.opaque,
-                      onPointerUp: (_) {
-                        setState(() => _localWidth = width);
-                        widget.onWidthChanged(width);
-                      },
-                      child: Container(
-                        width: 32,
-                        height: 32,
-                        margin: const EdgeInsets.symmetric(horizontal: 4),
-                        decoration: BoxDecoration(
-                          color: isThisWidthSelected ? Colors.orange.withOpacity(0.2) : null,
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                            color: isThisWidthSelected ? Colors.orange : Colors.grey[300]!,
-                            width: isThisWidthSelected ? 2 : 1,
-                          ),
+                children: [
+                  // 일반 지우개
+                  Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerUp: (_) {
+                      setState(() => _localTool = DrawingTool.eraser);
+                      widget.onToolChanged(DrawingTool.eraser);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: isEraserSelected ? Colors.orange.withOpacity(0.2) : null,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: isEraserSelected ? Colors.orange : Colors.grey[300]!,
+                          width: isEraserSelected ? 2 : 1,
                         ),
-                        child: Center(
-                          child: Text(
-                            '${width.toInt()}',
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.auto_fix_normal,
+                            size: 14,
+                            color: isEraserSelected ? Colors.orange : Colors.grey[700],
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '획 지우개',
                             style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: isThisWidthSelected ? FontWeight.bold : FontWeight.normal,
-                              color: isThisWidthSelected ? Colors.orange : Colors.grey[800],
+                              fontSize: 10,
+                              fontWeight: isEraserSelected ? FontWeight.bold : FontWeight.normal,
+                              color: isEraserSelected ? Colors.orange : Colors.grey[800],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  // 영역 지우개
+                  Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerUp: (_) {
+                      setState(() => _localTool = DrawingTool.areaEraser);
+                      widget.onToolChanged(DrawingTool.areaEraser);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: isAreaEraserSelected ? Colors.red.withOpacity(0.2) : null,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: isAreaEraserSelected ? Colors.red : Colors.grey[300]!,
+                          width: isAreaEraserSelected ? 2 : 1,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.select_all,
+                            size: 14,
+                            color: isAreaEraserSelected ? Colors.red : Colors.grey[700],
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '영역 지우개',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: isAreaEraserSelected ? FontWeight.bold : FontWeight.normal,
+                              color: isAreaEraserSelected ? Colors.red : Colors.grey[800],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              // 지우개 크기 (일반 지우개 선택 시에만 표시)
+              if (isEraserSelected) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '지우개 크기',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey[600],
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: QuickToolbar.eraserWidths.map((width) {
+                    final isThisWidthSelected = (_localWidth - width).abs() < 0.5;
+                    return Tooltip(
+                      message: '${width.toInt()}px',
+                      child: Listener(
+                        behavior: HitTestBehavior.opaque,
+                        onPointerUp: (_) {
+                          setState(() => _localWidth = width);
+                          widget.onWidthChanged(width);
+                        },
+                        child: Container(
+                          width: 28,
+                          height: 28,
+                          margin: const EdgeInsets.symmetric(horizontal: 3),
+                          decoration: BoxDecoration(
+                            color: isThisWidthSelected ? Colors.orange.withOpacity(0.2) : null,
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(
+                              color: isThisWidthSelected ? Colors.orange : Colors.grey[300]!,
+                              width: isThisWidthSelected ? 2 : 1,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${width.toInt()}',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: isThisWidthSelected ? FontWeight.bold : FontWeight.normal,
+                                color: isThisWidthSelected ? Colors.orange : Colors.grey[800],
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                  );
-                }).toList(),
-              ),
+                    );
+                  }).toList(),
+                ),
+              ],
             ],
           ),
         ),

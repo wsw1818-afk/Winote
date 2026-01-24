@@ -20,8 +20,6 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   // Default settings
-  double _defaultPenWidth = 2.0;
-  Color _defaultPenColor = Colors.black;
   Color _lassoColor = const Color(0xFF2196F3); // Blue
   bool _autoSaveEnabled = true;
   int _autoSaveDelay = 3;
@@ -34,10 +32,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   // Shape snap settings
   bool _shapeSnapEnabled = true;
   double _shapeSnapAngle = 15.0;
+  // Shape recognition (직선/원 자동 인식)
+  bool _shapeRecognitionEnabled = false;
 
   // Cloud sync settings
   final CloudSyncService _cloudSync = CloudSyncService.instance;
   bool _isSyncing = false;
+  bool _autoSyncEnabled = false;
 
   @override
   void initState() {
@@ -54,7 +55,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Future<void> _loadSettings() async {
     final settings = SettingsService.instance;
     setState(() {
-      _defaultPenWidth = settings.defaultPenWidth;
       _lassoColor = settings.lassoColor;
       _autoSaveEnabled = settings.autoSaveEnabled;
       _autoSaveDelay = settings.autoSaveDelay;
@@ -65,6 +65,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _touchDrawingEnabled = settings.touchDrawingEnabled;
       _shapeSnapEnabled = settings.shapeSnapEnabled;
       _shapeSnapAngle = settings.shapeSnapAngle;
+      _shapeRecognitionEnabled = settings.shapeRecognitionEnabled;
+      _autoSyncEnabled = settings.autoSyncEnabled;
     });
   }
 
@@ -88,43 +90,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ),
       body: ListView(
         children: [
-          // Pen Settings Section
-          _buildSectionHeader('펜 설정'),
-          ListTile(
-            leading: const Icon(Icons.edit),
-            title: const Text('기본 펜 굵기'),
-            subtitle: Text('${_defaultPenWidth.toStringAsFixed(1)}px'),
-            trailing: SizedBox(
-              width: 150,
-              child: Slider(
-                value: _defaultPenWidth,
-                min: 0.5,
-                max: 10.0,
-                divisions: 19,
-                label: _defaultPenWidth.toStringAsFixed(1),
-                onChanged: (value) async {
-                  setState(() => _defaultPenWidth = value);
-                  await SettingsService.instance.setDefaultPenWidth(value);
-                },
-              ),
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.color_lens),
-            title: const Text('기본 펜 색상'),
-            trailing: GestureDetector(
-              onTap: _showColorPicker,
-              child: Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: _defaultPenColor,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.grey[300]!),
-                ),
-              ),
-            ),
-          ),
+          // Lasso Settings Section
+          _buildSectionHeader('올가미 설정'),
           ListTile(
             leading: const Icon(Icons.gesture),
             title: const Text('올가미 선 색상'),
@@ -218,6 +185,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
             ),
+          SwitchListTile(
+            secondary: const Icon(Icons.auto_fix_high),
+            title: const Text('도형 자동 인식'),
+            subtitle: const Text('직선/원을 그리면 자동으로 교정'),
+            value: _shapeRecognitionEnabled,
+            onChanged: (value) async {
+              setState(() => _shapeRecognitionEnabled = value);
+              await SettingsService.instance.setShapeRecognitionEnabled(value);
+            },
+          ),
 
           const Divider(),
 
@@ -312,12 +289,23 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             trailing: const Icon(Icons.chevron_right),
             onTap: _setupLocalSync,
           ),
-          if (_cloudSync.isEnabled)
+          if (_cloudSync.isEnabled) ...[
+            SwitchListTile(
+              secondary: const Icon(Icons.sync),
+              title: const Text('자동 동기화'),
+              subtitle: const Text('노트 저장 시 자동으로 클라우드에 업로드'),
+              value: _autoSyncEnabled,
+              onChanged: (value) async {
+                setState(() => _autoSyncEnabled = value);
+                await SettingsService.instance.setAutoSyncEnabled(value);
+              },
+            ),
             ListTile(
               leading: const Icon(Icons.cloud_off, color: Colors.red),
               title: const Text('동기화 해제', style: TextStyle(color: Colors.red)),
               onTap: _disableSync,
             ),
+          ],
 
           const Divider(),
 
@@ -522,61 +510,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               },
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  void _showColorPicker() {
-    final colors = [
-      Colors.black,
-      Colors.grey,
-      Colors.red,
-      Colors.orange,
-      Colors.yellow,
-      Colors.green,
-      Colors.blue,
-      Colors.purple,
-      Colors.pink,
-      Colors.brown,
-    ];
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('기본 펜 색상'),
-        content: Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: colors.map((color) {
-            final isSelected = color == _defaultPenColor;
-            return GestureDetector(
-              onTap: () {
-                setState(() => _defaultPenColor = color);
-                Navigator.pop(context);
-              },
-              child: Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: isSelected ? Colors.blue : Colors.grey[300]!,
-                    width: isSelected ? 3 : 1,
-                  ),
-                ),
-                child: isSelected
-                    ? Icon(
-                        Icons.check,
-                        color: color.computeLuminance() > 0.5
-                            ? Colors.black
-                            : Colors.white,
-                      )
-                    : null,
-              ),
-            );
-          }).toList(),
         ),
       ),
     );

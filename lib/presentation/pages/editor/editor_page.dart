@@ -19,6 +19,7 @@ import '../../../core/services/image_export_service.dart';
 import '../../../core/services/stroke_smoothing_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/backup_service.dart';
+import '../../../core/services/cloud_sync_service.dart';
 import '../../widgets/canvas/drawing_canvas.dart';
 import '../../widgets/toolbar/drawing_toolbar.dart';
 import '../../widgets/toolbar/quick_toolbar.dart';
@@ -93,6 +94,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   bool _autoSaveEnabled = true;
   int _autoSaveDelay = 3; // seconds
 
+  // Auto-sync (클라우드 동기화)
+  bool _autoSyncEnabled = false;
+
   // Image editing state
   bool _showImageEditToolbar = false;
 
@@ -149,11 +153,14 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     final settings = SettingsService.instance;
     _autoSaveEnabled = settings.autoSaveEnabled;
     _autoSaveDelay = settings.autoSaveDelay;
+    _autoSyncEnabled = settings.autoSyncEnabled;
     _penWidth = settings.defaultPenWidth;
     _eraserWidth = settings.defaultEraserWidth;
     _currentTemplate = settings.defaultTemplate;
     _lassoColor = settings.lassoColor;
     _showDebugOverlay = settings.showDebugOverlay;
+    // 도형 자동 인식 설정 적용
+    StrokeSmoothingService.instance.shapeRecognitionEnabled = settings.shapeRecognitionEnabled;
   }
 
   /// 현재 도구에 맞는 색상 반환
@@ -220,6 +227,14 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     _saveCurrentPageStrokes();
 
     await _storageService.saveNote(_currentNote!);
+
+    // 자동 클라우드 동기화가 활성화되어 있으면 업로드
+    if (_autoSyncEnabled && _currentNote != null) {
+      final cloudSync = CloudSyncService.instance;
+      if (cloudSync.isEnabled) {
+        await cloudSync.uploadNote(_currentNote!);
+      }
+    }
 
     if (mounted) {
       setState(() => _hasChanges = false);
@@ -537,7 +552,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                             pageTemplate: _currentTemplate,
                             backgroundImagePath: _backgroundImagePath,
                             overlayTemplate: _overlayTemplate,
-                            lassoColor: _currentColor,
+                            lassoColor: _lassoColor,
                             laserPointerColor: _laserPointerColor,
                             presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
                             presentationHighlighterFadeSpeed: _presentationHighlighterFadeSpeed,
@@ -572,6 +587,12 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                                 _closePanelCallback!();
                                 _closePanelCallback = null;
                               }
+                            },
+                            onToolChanged: (tool) {
+                              // 롱프레스 메뉴에서 도구 변경 시 (예: 올가미로 전환)
+                              setState(() {
+                                _currentTool = tool;
+                              });
                             },
                     ),
                   ),
@@ -622,6 +643,9 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   Widget _buildPageNavigationBar() {
     final pageCount = _currentNote?.pageCount ?? 1;
+    final isCurrentPageBookmarked = _currentNote != null &&
+        _currentPageIndex < _currentNote!.pages.length &&
+        _currentNote!.pages[_currentPageIndex].isBookmarked;
 
     return Container(
       height: 56,
@@ -632,6 +656,28 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          // 책갈피 토글 버튼
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.grey[300]!),
+            ),
+            child: IconButton(
+              icon: Icon(
+                isCurrentPageBookmarked ? Icons.bookmark : Icons.bookmark_border,
+                color: isCurrentPageBookmarked ? Colors.amber : Colors.grey[600],
+              ),
+              onPressed: () => _togglePageBookmark(_currentPageIndex),
+              tooltip: isCurrentPageBookmarked ? '책갈피 해제' : '책갈피 추가',
+              iconSize: 22,
+              padding: const EdgeInsets.all(8),
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            ),
+          ),
+
+          const SizedBox(width: 8),
+
           // 가운데 정렬된 페이지 네비게이션 그룹
           Container(
             decoration: BoxDecoration(
@@ -687,7 +733,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
             ),
           ),
 
-          const SizedBox(width: 16),
+          const SizedBox(width: 8),
 
           // Add page button (분리)
           Container(
@@ -749,70 +795,273 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   void _showPageListDialog() {
     final pageCount = _currentNote?.pageCount ?? 1;
+    // 책갈피 페이지만 보기 모드
+    bool showBookmarksOnly = false;
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Row(
-          children: [
-            const Text('페이지 선택'),
-            const Spacer(),
-            Text(
-              '$pageCount페이지',
-              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
-            ),
-          ],
-        ),
-        content: SizedBox(
-          width: 400,
-          height: 500,
-          child: GridView.builder(
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 3,
-              crossAxisSpacing: 8,
-              mainAxisSpacing: 8,
-              childAspectRatio: 0.75, // A4 비율에 가깝게
-            ),
-            itemCount: pageCount,
-            itemBuilder: (context, index) {
-              final page = _currentNote!.pages[index];
-              final isCurrentPage = index == _currentPageIndex;
-              final strokeCount = page.strokes.length;
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          // 표시할 페이지 목록 (책갈피 필터 적용)
+          final displayPages = showBookmarksOnly
+              ? _currentNote!.pages.where((p) => p.isBookmarked).toList()
+              : _currentNote!.pages;
 
-              return _buildPageThumbnail(
-                page: page,
-                pageIndex: index,
-                isCurrentPage: isCurrentPage,
-                strokeCount: strokeCount,
-                canDelete: pageCount > 1,
-                onTap: () {
+          return AlertDialog(
+            title: Row(
+              children: [
+                const Text('페이지 선택'),
+                const Spacer(),
+                // 책갈피 필터 토글
+                IconButton(
+                  icon: Icon(
+                    showBookmarksOnly ? Icons.bookmark : Icons.bookmark_border,
+                    color: showBookmarksOnly ? Colors.amber : Colors.grey,
+                  ),
+                  tooltip: showBookmarksOnly ? '전체 보기' : '책갈피만 보기',
+                  onPressed: () {
+                    setDialogState(() {
+                      showBookmarksOnly = !showBookmarksOnly;
+                    });
+                  },
+                ),
+                Text(
+                  '$pageCount페이지',
+                  style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: 400,
+              height: 500,
+              child: displayPages.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.bookmark_border, size: 48, color: Colors.grey[400]),
+                          const SizedBox(height: 16),
+                          Text(
+                            '책갈피된 페이지가 없습니다',
+                            style: TextStyle(color: Colors.grey[600]),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ReorderableListView.builder(
+                      shrinkWrap: true,
+                      buildDefaultDragHandles: false,
+                      itemCount: displayPages.length,
+                      onReorder: (oldIndex, newIndex) {
+                        if (showBookmarksOnly) return; // 책갈피 모드에서는 순서 변경 불가
+                        if (newIndex > oldIndex) newIndex--;
+                        _reorderPage(oldIndex, newIndex);
+                        setDialogState(() {});
+                      },
+                      itemBuilder: (context, index) {
+                        final page = displayPages[index];
+                        // 실제 페이지 인덱스 찾기
+                        final actualIndex = _currentNote!.pages.indexOf(page);
+                        final isCurrentPage = actualIndex == _currentPageIndex;
+                        final strokeCount = page.strokes.length;
+
+                        return ReorderableDragStartListener(
+                          key: ValueKey('page_${page.pageNumber}'),
+                          index: index,
+                          enabled: !showBookmarksOnly, // 책갈피 모드에서는 드래그 비활성화
+                          child: _buildPageListItem(
+                            page: page,
+                            pageIndex: actualIndex,
+                            isCurrentPage: isCurrentPage,
+                            strokeCount: strokeCount,
+                            canDelete: pageCount > 1,
+                            showDragHandle: !showBookmarksOnly,
+                            onTap: () {
+                              Navigator.pop(context);
+                              _goToPage(actualIndex);
+                            },
+                            onBookmarkToggle: () {
+                              _togglePageBookmark(actualIndex);
+                              setDialogState(() {});
+                            },
+                            onDuplicate: () {
+                              _duplicatePage(actualIndex);
+                              setDialogState(() {});
+                            },
+                            onDelete: () {
+                              Navigator.pop(context);
+                              _showDeletePageDialog(actualIndex);
+                            },
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('닫기'),
+              ),
+              TextButton.icon(
+                onPressed: () {
                   Navigator.pop(context);
-                  _goToPage(index);
+                  _addNewPage();
                 },
-                onDelete: () {
-                  Navigator.pop(context);
-                  _showDeletePageDialog(index);
-                },
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('닫기'),
-          ),
-          TextButton.icon(
-            onPressed: () {
-              Navigator.pop(context);
-              _addNewPage();
-            },
-            icon: const Icon(Icons.add, size: 18),
-            label: const Text('페이지 추가'),
-          ),
-        ],
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('페이지 추가'),
+              ),
+            ],
+          );
+        },
       ),
     );
+  }
+
+  /// 페이지 리스트 아이템 빌드 (드래그로 순서 변경 가능)
+  Widget _buildPageListItem({
+    required NotePage page,
+    required int pageIndex,
+    required bool isCurrentPage,
+    required int strokeCount,
+    required bool canDelete,
+    required bool showDragHandle,
+    required VoidCallback onTap,
+    required VoidCallback onBookmarkToggle,
+    required VoidCallback onDuplicate,
+    required VoidCallback onDelete,
+  }) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      color: isCurrentPage ? Colors.blue.withOpacity(0.1) : null,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              // 드래그 핸들
+              if (showDragHandle)
+                const Icon(Icons.drag_handle, color: Colors.grey),
+              if (showDragHandle) const SizedBox(width: 8),
+
+              // 페이지 번호
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: isCurrentPage ? Colors.blue : Colors.grey[300],
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Center(
+                  child: Text(
+                    '${pageIndex + 1}',
+                    style: TextStyle(
+                      color: isCurrentPage ? Colors.white : Colors.black,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+
+              // 페이지 정보
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          '페이지 ${pageIndex + 1}',
+                          style: TextStyle(
+                            fontWeight: isCurrentPage ? FontWeight.bold : FontWeight.normal,
+                          ),
+                        ),
+                        if (page.isBookmarked)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 4),
+                            child: Icon(Icons.bookmark, size: 16, color: Colors.amber),
+                          ),
+                      ],
+                    ),
+                    Text(
+                      strokeCount > 0 ? '$strokeCount개 스트로크' : '빈 페이지',
+                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                    ),
+                  ],
+                ),
+              ),
+
+              // 액션 버튼들
+              IconButton(
+                icon: Icon(
+                  page.isBookmarked ? Icons.bookmark : Icons.bookmark_border,
+                  color: page.isBookmarked ? Colors.amber : Colors.grey,
+                ),
+                tooltip: page.isBookmarked ? '책갈피 해제' : '책갈피 추가',
+                onPressed: onBookmarkToggle,
+                iconSize: 20,
+              ),
+              IconButton(
+                icon: const Icon(Icons.copy),
+                tooltip: '페이지 복제',
+                onPressed: onDuplicate,
+                iconSize: 20,
+              ),
+              if (canDelete)
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, color: Colors.red),
+                  tooltip: '페이지 삭제',
+                  onPressed: onDelete,
+                  iconSize: 20,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 페이지 책갈피 토글
+  void _togglePageBookmark(int pageIndex) {
+    if (_currentNote == null) return;
+    final pageNumber = _currentNote!.pages[pageIndex].pageNumber;
+    setState(() {
+      _currentNote = _currentNote!.togglePageBookmark(pageNumber);
+      _hasChanges = true;
+    });
+  }
+
+  /// 페이지 복제
+  void _duplicatePage(int pageIndex) {
+    if (_currentNote == null) return;
+    final pageNumber = _currentNote!.pages[pageIndex].pageNumber;
+    setState(() {
+      _currentNote = _currentNote!.duplicatePage(pageNumber);
+      _hasChanges = true;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('페이지가 복제되었습니다'), duration: Duration(seconds: 1)),
+    );
+  }
+
+  /// 페이지 순서 변경
+  void _reorderPage(int oldIndex, int newIndex) {
+    if (_currentNote == null) return;
+    // 현재 페이지 저장
+    _saveCurrentPageStrokes();
+    setState(() {
+      _currentNote = _currentNote!.reorderPages(oldIndex, newIndex);
+      // 현재 페이지 인덱스 조정
+      if (_currentPageIndex == oldIndex) {
+        _currentPageIndex = newIndex;
+      } else if (oldIndex < _currentPageIndex && newIndex >= _currentPageIndex) {
+        _currentPageIndex--;
+      } else if (oldIndex > _currentPageIndex && newIndex <= _currentPageIndex) {
+        _currentPageIndex++;
+      }
+      _hasChanges = true;
+    });
   }
 
   /// 페이지 썸네일 위젯 빌드
@@ -994,6 +1243,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       case DrawingTool.highlighter:
         return ToolType.highlighter;
       case DrawingTool.eraser:
+      case DrawingTool.areaEraser:
         return ToolType.eraser;
       case DrawingTool.lasso:
       case DrawingTool.laserPointer:

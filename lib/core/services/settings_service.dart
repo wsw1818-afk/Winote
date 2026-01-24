@@ -60,6 +60,9 @@ class SettingsService {
     if (!_settings.containsKey('autoSaveDelay')) {
       _settings['autoSaveDelay'] = 3;
     }
+    if (!_settings.containsKey('autoSyncEnabled')) {
+      _settings['autoSyncEnabled'] = false; // 기본값: 비활성화
+    }
   }
 
   /// Save settings to file
@@ -225,6 +228,67 @@ class SettingsService {
 
   Future<void> setShapeSnapAngle(double angle) async {
     _settings['shapeSnapAngle'] = angle;
+    await _save();
+  }
+
+  // Auto Sync (자동 클라우드 동기화)
+  bool get autoSyncEnabled => _settings['autoSyncEnabled'] as bool? ?? false;
+
+  Future<void> setAutoSyncEnabled(bool enabled) async {
+    _settings['autoSyncEnabled'] = enabled;
+    await _save();
+  }
+
+  // Pen Presets (펜 프리셋, 최대 5개)
+  // 각 프리셋: {name: String, color: int, width: double, toolType: String}
+  List<Map<String, dynamic>> get penPresets {
+    final presets = _settings['penPresets'] as List<dynamic>?;
+    if (presets == null) {
+      // 기본 프리셋 3개
+      return [
+        {'name': '검정 펜', 'color': 0xFF000000, 'width': 2.0, 'toolType': 'pen'},
+        {'name': '빨강 펜', 'color': 0xFFD32F2F, 'width': 2.0, 'toolType': 'pen'},
+        {'name': '파랑 형광펜', 'color': 0xFF2196F3, 'width': 15.0, 'toolType': 'highlighter'},
+      ];
+    }
+    return presets.map((p) => Map<String, dynamic>.from(p as Map)).toList();
+  }
+
+  Future<void> setPenPresets(List<Map<String, dynamic>> presets) async {
+    _settings['penPresets'] = presets;
+    await _save();
+  }
+
+  Future<void> addPenPreset(Map<String, dynamic> preset) async {
+    final presets = List<Map<String, dynamic>>.from(penPresets);
+    if (presets.length >= 5) {
+      presets.removeAt(0); // 5개 초과 시 가장 오래된 것 제거
+    }
+    presets.add(preset);
+    await setPenPresets(presets);
+  }
+
+  Future<void> updatePenPreset(int index, Map<String, dynamic> preset) async {
+    final presets = List<Map<String, dynamic>>.from(penPresets);
+    if (index >= 0 && index < presets.length) {
+      presets[index] = preset;
+      await setPenPresets(presets);
+    }
+  }
+
+  Future<void> removePenPreset(int index) async {
+    final presets = List<Map<String, dynamic>>.from(penPresets);
+    if (index >= 0 && index < presets.length) {
+      presets.removeAt(index);
+      await setPenPresets(presets);
+    }
+  }
+
+  // Shape Recognition (도형 자동 인식: 직선/원)
+  bool get shapeRecognitionEnabled => _settings['shapeRecognitionEnabled'] as bool? ?? false;
+
+  Future<void> setShapeRecognitionEnabled(bool enabled) async {
+    _settings['shapeRecognitionEnabled'] = enabled;
     await _save();
   }
 }

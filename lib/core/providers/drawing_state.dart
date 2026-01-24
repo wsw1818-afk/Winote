@@ -8,6 +8,7 @@ enum DrawingTool {
   pen,
   highlighter,
   eraser,
+  areaEraser, // 영역 지우개 (올가미로 선택한 영역의 스트로크 전체 삭제)
   lasso, // 올가미 선택 도구
   laserPointer, // 레이저 포인터 (발표용)
   presentationHighlighter, // 프레젠테이션 형광펜 (줄 긋고 사라짐)
@@ -172,10 +173,11 @@ class DrawingState extends ChangeNotifier {
       case DrawingTool.highlighter:
         return _highlighterColor;
       case DrawingTool.eraser:
+      case DrawingTool.areaEraser:
       case DrawingTool.lasso:
       case DrawingTool.laserPointer:
       case DrawingTool.presentationHighlighter:
-        return Colors.white; // Not used for eraser/lasso/laser/presentationHighlighter
+        return Colors.white; // Not used for eraser/areaEraser/lasso/laser/presentationHighlighter
     }
   }
 
@@ -191,10 +193,11 @@ class DrawingState extends ChangeNotifier {
       case DrawingTool.highlighter:
         return _highlighterWidth;
       case DrawingTool.eraser:
+      case DrawingTool.areaEraser:
       case DrawingTool.lasso:
       case DrawingTool.laserPointer:
       case DrawingTool.presentationHighlighter:
-        return _eraserWidth; // Lasso/laser/presentationHighlighter uses eraser width for visual
+        return _eraserWidth; // areaEraser/Lasso/laser/presentationHighlighter uses eraser width for visual
     }
   }
 
@@ -329,7 +332,7 @@ class DrawingState extends ChangeNotifier {
   /// Update canvas transform
   void setTransform({double? scale, Offset? offset}) {
     if (scale != null) {
-      _scale = scale.clamp(1.0, 1.5);
+      _scale = scale.clamp(1.0, 3.0);
     }
     if (offset != null) {
       _offset = offset;

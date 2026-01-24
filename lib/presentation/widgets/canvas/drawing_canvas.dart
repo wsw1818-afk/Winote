@@ -54,6 +54,8 @@ class DrawingCanvas extends StatefulWidget {
   final double presentationHighlighterFadeSpeed; // 페이드 속도 배율 (1.0 = 기본, 2.0 = 2배 빠름)
   // 패널 닫기 콜백 (캔버스 터치 시 패널 닫기)
   final VoidCallback? onCanvasTouchStart;
+  // 도구 변경 콜백 (롱프레스 메뉴에서 올가미 도구 전환 시)
+  final void Function(DrawingTool tool)? onToolChanged;
 
   const DrawingCanvas({
     super.key,
@@ -92,6 +94,7 @@ class DrawingCanvas extends StatefulWidget {
     this.presentationHighlighterFadeEnabled = true,
     this.presentationHighlighterFadeSpeed = 1.0,
     this.onCanvasTouchStart,
+    this.onToolChanged,
   });
 
   @override
@@ -153,6 +156,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   // Palm rejection: S-Pen drawing state
   bool _isPenDrawing = false; // True when S-Pen is actively drawing
   int? _penDrawStartTime; // Time when pen started drawing
+  int? _penHoverStartTime; // Time when pen started hovering (for palm rejection)
+  static const int _palmRejectionGracePeriod = 1000; // 1초 grace period (펜 사용 후)
 
   // Auto-scroll when drawing near edge (for zoomed-in state)
   static const double _edgeScrollMargin = 60.0; // pixels from edge to trigger scroll
@@ -171,6 +176,13 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   bool _isDraggingSelection = false;
   Offset? _selectionDragStart;
   Offset _selectionOffset = Offset.zero;
+
+  // 스트로크 변경 추적 (색상/굵기 변경 시 Key 갱신용)
+  int _strokeContentVersion = 0;
+
+  // Area eraser
+  List<Offset> _areaEraserPath = [];
+  bool _isAreaEraserActive = false;
 
   // Background image for custom template
   ui.Image? _loadedBackgroundImage;
@@ -247,6 +259,14 @@ class DrawingCanvasState extends State<DrawingCanvas> {
   String? _showDeleteButtonForImageId;
   static const double _deleteButtonSize = 32.0;
   static const double _deleteButtonOffset = 10.0; // 오른쪽 상단에서 떨어진 거리
+
+  // 스트로크 롱프레스 올가미 메뉴 상태
+  Timer? _strokeLongPressTimer;
+  Offset? _strokeLongPressPosition; // 캔버스 좌표
+  Offset? _strokeLongPressScreenPosition; // 화면 좌표 (메뉴 표시용)
+  bool _showStrokeLassoMenu = false;
+  String? _longPressedStrokeId; // 롱프레스한 스트로크 ID
+  static const int _strokeLongPressDuration = 800; // 0.8초 (빠른 반응)
 
   // Table cell border resize state (long press activated)
   bool _isResizingTableBorder = false;
@@ -327,6 +347,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _imageDeleteLongPressTimer?.cancel();
     _laserPointerFadeTimer?.cancel();
     _presentationHighlighterFadeTimer?.cancel();
+    _strokeLongPressTimer?.cancel();
 
     // 이미지 캐시 정리
     for (final image in _loadedImages.values) {
@@ -620,6 +641,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           onPointerMove: _onPointerMove,
           onPointerUp: _onPointerUp,
           onPointerCancel: _onPointerCancel,
+          onPointerHover: _onPointerHover, // 펜 호버링 감지 (Palm rejection용)
           behavior: HitTestBehavior.opaque,
           child: ClipRect(
             child: Transform(
@@ -699,7 +721,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                   // Key 최적화: 지우개 위치는 Key에서 제외하여 불필요한 rebuild 방지
                   // _StrokePainter의 shouldRepaint가 지우개 위치 변경 시 repaint만 수행
                   RepaintBoundary(
-                    key: ValueKey('strokes_${_strokes.length}_${_selectedStrokeIds.length}'),
+                    key: ValueKey('strokes_${_strokes.length}_${_selectedStrokeIds.length}_$_strokeContentVersion'),
                     child: CustomPaint(
                       painter: _StrokePainter(
                         strokes: _strokes,
@@ -746,6 +768,26 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                   scale: _scale,
                   offset: _offset,
                   lassoColor: widget.lassoColor,
+                ),
+              ),
+            ),
+          ),
+        // Area eraser overlay
+        if (widget.drawingTool == DrawingTool.areaEraser && _areaEraserPath.isNotEmpty)
+          Positioned(
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              child: CustomPaint(
+                key: ValueKey('area_eraser_overlay_${_areaEraserPath.length}'),
+                isComplex: true,
+                willChange: true,
+                painter: _AreaEraserOverlayPainter(
+                  path: _areaEraserPath,
+                  scale: _scale,
+                  offset: _offset,
                 ),
               ),
             ),
@@ -828,6 +870,47 @@ class DrawingCanvasState extends State<DrawingCanvas> {
                       'Tool: ${widget.drawingTool.name}',
                       style: const TextStyle(color: Colors.white, fontSize: 11),
                     ),
+                    // 롱프레스 디버그 정보
+                    Container(
+                      margin: const EdgeInsets.only(top: 4),
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: _strokeLongPressTimer != null ? Colors.orange.withOpacity(0.3) : Colors.transparent,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '롱프레스: ${_strokeLongPressTimer != null ? "대기중" : "없음"}',
+                            style: TextStyle(
+                              color: _strokeLongPressTimer != null ? Colors.orange : Colors.white70,
+                              fontSize: 11,
+                              fontWeight: _strokeLongPressTimer != null ? FontWeight.bold : FontWeight.normal,
+                            ),
+                          ),
+                          if (_longPressedStrokeId != null)
+                            Text(
+                              '대상 스트로크: ${_longPressedStrokeId!.substring(0, 8)}...',
+                              style: const TextStyle(color: Colors.yellow, fontSize: 10),
+                            ),
+                          Text(
+                            '메뉴표시: ${_showStrokeLassoMenu ? "YES" : "NO"}',
+                            style: TextStyle(
+                              color: _showStrokeLassoMenu ? Colors.green : Colors.white70,
+                              fontSize: 11,
+                            ),
+                          ),
+                          Text(
+                            '선택된 스트로크: ${_selectedStrokeIds.length}개',
+                            style: TextStyle(
+                              color: _selectedStrokeIds.isNotEmpty ? Colors.cyan : Colors.white70,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                     const Text(
                       '(Tap to hide)',
                       style: TextStyle(color: Colors.white54, fontSize: 9),
@@ -860,6 +943,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         // 이미지 삭제 버튼 (1초 롱프레스 후 표시)
         if (_showDeleteButtonForImageId != null)
           _buildDeleteButtonForImage(),
+        // 스트로크 롱프레스 올가미 메뉴
+        if (_showStrokeLassoMenu && _strokeLongPressScreenPosition != null)
+          _buildStrokeLassoMenu(),
         // Zoom controls
         Positioned(
           bottom: 16,
@@ -960,6 +1046,159 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     );
   }
 
+  /// 스트로크 롱프레스 올가미 미니 툴바 위젯
+  Widget _buildStrokeLassoMenu() {
+    if (_strokeLongPressScreenPosition == null || _selectedStrokeIds.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    // 미니 툴바 위치 계산
+    final toolbarWidth = 236.0; // 변형 버튼 추가
+    final toolbarHeight = 44.0;
+    final screenSize = _canvasSize ?? const Size(400, 600);
+    final minTopMargin = 70.0; // 상단 여백 (AppBar 등 고려)
+
+    // 선택 영역의 bounds 가져오기
+    final bounds = _getSelectionBounds();
+
+    // 화면 경계를 넘지 않도록 위치 조정
+    double left = _strokeLongPressScreenPosition!.dx - toolbarWidth / 2;
+    double top;
+
+    // 선택 영역 상단이 툴바+여백보다 충분한 공간이 있으면 위에 표시, 아니면 아래에 표시
+    if (bounds != null && bounds.top < minTopMargin + toolbarHeight + 20) {
+      // 위에 공간이 부족하면 선택 영역 아래쪽에 표시
+      top = bounds.bottom + 20;
+    } else {
+      // 기본: 선택 영역 위쪽에 표시
+      top = _strokeLongPressScreenPosition!.dy - toolbarHeight - 20;
+    }
+
+    // 왼쪽 경계
+    if (left < 8) left = 8;
+    // 오른쪽 경계
+    if (left + toolbarWidth > screenSize.width - 8) {
+      left = screenSize.width - toolbarWidth - 8;
+    }
+    // 아래쪽 경계 (화면 밖으로 나가지 않도록)
+    if (top + toolbarHeight > screenSize.height - 8) {
+      top = screenSize.height - toolbarHeight - 8;
+    }
+    // 위쪽 경계 (최소값)
+    if (top < 8) {
+      top = 8;
+    }
+
+    return Positioned(
+      left: left,
+      top: top,
+      child: Material(
+        elevation: 8,
+        borderRadius: BorderRadius.circular(24),
+        color: Colors.grey[850],
+        child: Container(
+          height: toolbarHeight,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 선택 개수 표시
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${_selectedStrokeIds.length}개',
+                  style: const TextStyle(
+                    color: Colors.blue,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              // 글씨 변경 버튼 (색상 + 굵기)
+              _buildMiniToolbarButton(
+                icon: Icons.edit,
+                tooltip: '글씨 변경',
+                color: Colors.amber[300],
+                onTap: () {
+                  _showStrokeEditDialog();
+                },
+              ),
+              // 변형 버튼 (회전/크기)
+              _buildMiniToolbarButton(
+                icon: Icons.transform,
+                tooltip: '변형',
+                color: Colors.lightBlue[300],
+                onTap: () {
+                  _showTransformDialog();
+                },
+              ),
+              // 복사 버튼
+              _buildMiniToolbarButton(
+                icon: Icons.copy,
+                tooltip: '복사',
+                onTap: () {
+                  copySelection();
+                  _closeStrokeLassoMenu();
+                },
+              ),
+              // 삭제 버튼
+              _buildMiniToolbarButton(
+                icon: Icons.delete_outline,
+                tooltip: '삭제',
+                color: Colors.red[300],
+                onTap: () {
+                  deleteSelection();
+                  _closeStrokeLassoMenu();
+                },
+              ),
+              // 닫기 버튼
+              _buildMiniToolbarButton(
+                icon: Icons.close,
+                tooltip: '선택 해제',
+                onTap: () {
+                  setState(() {
+                    _selectedStrokeIds.clear();
+                    _lassoPath.clear();
+                  });
+                  _closeStrokeLassoMenu();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 미니 툴바 버튼 위젯
+  Widget _buildMiniToolbarButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onTap,
+    Color? color,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Icon(icon, color: color ?? Colors.white70, size: 20),
+        ),
+      ),
+    );
+  }
+
   /// 선택된 표 삭제
   void _deleteSelectedTable() {
     if (_showDeleteButtonForTableId == null) return;
@@ -1040,7 +1279,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   void _zoom(double factor) {
     setState(() {
-      _scale = (_scale * factor).clamp(1.0, 1.5);
+      _scale = (_scale * factor).clamp(1.0, 3.0);
     });
   }
 
@@ -1209,11 +1448,36 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Track if finger tapped on element (set in finger touch block)
     bool tappedOnElement = false;
 
-    // 올가미/레이저포인터/프레젠테이션형광펜 도구: S-Pen이 touch로 감지되어도 첫 포인터는 해당 도구로 처리
+    // ========== PALM REJECTION (최우선 처리) ==========
+    // 펜 필기 중이거나 펜 사용 직후에는 모든 터치 입력을 무시
+    // 이 체크를 가장 먼저 수행하여 손바닥 터치가 줌/팬을 트리거하는 것을 방지
+    if (isFingerTouch) {
+      // 펜 필기 중이면 터치 무시
+      if (_isPenDrawing) {
+        _perfLog('FINGER IGNORED (pen drawing)', inputType: 'TOUCH', pos: event.localPosition);
+        return;
+      }
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      // 펜 사용 후 grace period 동안 터치 무시 (손바닥 접촉 방지)
+      if (_penDrawStartTime != null && (now - _penDrawStartTime!) < _palmRejectionGracePeriod) {
+        _perfLog('FINGER IGNORED (pen grace period ${now - _penDrawStartTime!}ms)', inputType: 'TOUCH', pos: event.localPosition);
+        return;
+      }
+      // 펜 호버링 후 grace period 동안 터치 무시
+      if (_penHoverStartTime != null && (now - _penHoverStartTime!) < _palmRejectionGracePeriod) {
+        _perfLog('FINGER IGNORED (pen hover grace ${now - _penHoverStartTime!}ms)', inputType: 'TOUCH', pos: event.localPosition);
+        return;
+      }
+    }
+    // ========== END PALM REJECTION ==========
+
+    // 올가미/레이저포인터/프레젠테이션형광펜/영역지우개 도구: S-Pen이 touch로 감지되어도 첫 포인터는 해당 도구로 처리
     // Windows에서 S-Pen은 종종 touch로 감지되므로, 이 도구들 선택 시 첫 터치를 허용
     final isSpecialTool = widget.drawingTool == DrawingTool.lasso ||
                           widget.drawingTool == DrawingTool.laserPointer ||
-                          widget.drawingTool == DrawingTool.presentationHighlighter;
+                          widget.drawingTool == DrawingTool.presentationHighlighter ||
+                          widget.drawingTool == DrawingTool.areaEraser;
     if (isSpecialTool && _activePointerId == null) {
       // S-Pen 또는 첫 번째 터치인 경우 해당 도구 처리로 진행
       // (아래 도구별 처리 코드로 fall through)
@@ -1224,18 +1488,6 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Windows에서 두 번째 손가락이 PEN으로 감지되는 문제 해결
     else if (isFingerTouch || (_activePointers.isNotEmpty && !_isPenDrawing)) {
       _log('=== FINGER TOUCH DETECTED === Checking for element tap first');
-      // PALM REJECTION: Ignore finger touches while S-Pen is drawing
-      // or shortly after S-Pen was used (500ms grace period)
-      if (_isPenDrawing) {
-        _perfLog('FINGER IGNORED (pen drawing)', inputType: 'TOUCH', pos: event.localPosition);
-        return;
-      }
-
-      final now = DateTime.now().millisecondsSinceEpoch;
-      if (_penDrawStartTime != null && (now - _penDrawStartTime!) < 500) {
-        _perfLog('FINGER IGNORED (pen grace period)', inputType: 'TOUCH', pos: event.localPosition);
-        return;
-      }
 
       // Check if finger is tapping on an element (image/text/shape/table)
       // If so, allow element manipulation instead of pan/zoom
@@ -1336,7 +1588,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     // Activate first pointer
     _activePointerId = event.pointer;
     _isPenDrawing = true;
-    _penDrawStartTime = DateTime.now().millisecondsSinceEpoch;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _penDrawStartTime = now;
+    _penHoverStartTime = now; // 펜 터치 시 호버 타임도 업데이트 (Palm rejection용)
     _log('Pointer activated: ${event.pointer}, currentTool: ${widget.drawingTool}, isLassoFirstTouch: $isLassoFirstTouch');
 
     // Check if tapping on an image or text first (any tool)
@@ -1850,6 +2104,9 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _log('Lasso: Start dragging selection');
         setState(() {
           _lastDeviceKind = 'Lasso (drag)';
+          // 드래그 시작 시 메뉴 숨김
+          _showStrokeLassoMenu = false;
+          _strokeLongPressScreenPosition = null;
         });
         return;
       }
@@ -1864,6 +2121,21 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _lastDeviceKind = 'Lasso';
       });
       _log('Lasso: _lassoPath initialized with ${_lassoPath.length} points');
+      return;
+    }
+
+    // Handle area eraser tool
+    if (widget.drawingTool == DrawingTool.areaEraser) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      _log('AreaEraser DOWN at $canvasPos');
+
+      // Start new area eraser path
+      setState(() {
+        _areaEraserPath = [canvasPos];
+        _isAreaEraserActive = true;
+        _inputCount++;
+        _lastDeviceKind = 'AreaEraser';
+      });
       return;
     }
 
@@ -1939,6 +2211,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           }
         }
       }
+
+      // 스트로크 위 롱프레스 감지는 펜/형광펜 필기 중에는 하지 않음
+      // 펜으로 필기할 때 기존 스트로크 위를 지나가면 올가미 메뉴가 뜨는 버그 방지
+      // (올가미 메뉴는 올가미 도구 선택 시에만 표시되어야 함)
     }
 
     // Determine color based on tool
@@ -2099,28 +2375,6 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     // 표(Table)와 이미지(Image)는 지우개로 삭제하지 않음
     // 실수로 삭제되는 것을 방지하기 위해 선택 후 삭제 버튼으로만 삭제 가능
-  }
-
-  /// 점에서 선분까지의 최단 거리 계산
-  double _pointToLineDistance(Offset point, Offset lineStart, Offset lineEnd) {
-    final dx = lineEnd.dx - lineStart.dx;
-    final dy = lineEnd.dy - lineStart.dy;
-    final lengthSquared = dx * dx + dy * dy;
-
-    if (lengthSquared == 0) {
-      // 선분이 점인 경우
-      return (point - lineStart).distance;
-    }
-
-    // 선분 위 가장 가까운 점의 파라미터 t (0~1 범위로 클램프)
-    var t = ((point.dx - lineStart.dx) * dx + (point.dy - lineStart.dy) * dy) / lengthSquared;
-    t = t.clamp(0.0, 1.0);
-
-    // 선분 위 가장 가까운 점
-    final closestX = lineStart.dx + t * dx;
-    final closestY = lineStart.dy + t * dy;
-
-    return (point - Offset(closestX, closestY)).distance;
   }
 
   /// Split a stroke into segments, excluding erased indices
@@ -2331,6 +2585,8 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _pendingDragElementType = null;
         _elementTapStartTime = null;
         _elementTapStartPos = null;
+        // 스트로크 롱프레스 타이머도 취소
+        _cancelStrokeLongPressTimer();
       }
     }
 
@@ -2513,7 +2769,7 @@ class DrawingCanvasState extends State<DrawingCanvas> {
           // 핀치 시작 시점 대비 스케일 변화율 계산
           final rawScaleFactor = currentSpan / _baseSpan;
 
-          // 새 스케일 계산 (클램핑: 1.0x ~ 3.0x)
+          // 새 스케일 계산 (클램핑: 1.0x ~ 3.0x, 축소 시 공백 방지)
           final newScale = (_baseScale * rawScaleFactor).clamp(1.0, 3.0);
 
           // 핀치 중심(focal point) 기준으로 오프셋 계산
@@ -2578,6 +2834,16 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _lastErasePoint = canvasPos;
       _eraseAt(canvasPos);
       setState(() {
+        _inputCount++;
+      });
+      return;
+    }
+
+    // Handle area eraser
+    if (widget.drawingTool == DrawingTool.areaEraser && event.pointer == _activePointerId && _isAreaEraserActive) {
+      final canvasPos = _screenToCanvas(event.localPosition);
+      setState(() {
+        _areaEraserPath.add(canvasPos);
         _inputCount++;
       });
       return;
@@ -2761,6 +3027,11 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _longPressTriggered = false;
     }
 
+    // 스트로크 롱프레스 타이머 취소 (메뉴가 이미 표시된 경우는 유지)
+    if (!_showStrokeLassoMenu) {
+      _cancelStrokeLongPressTimer();
+    }
+
     // Handle finger gesture end
     if (_activePointers.containsKey(event.pointer)) {
       _activePointers.remove(event.pointer);
@@ -2893,6 +3164,41 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       return;
     }
 
+    // Handle area eraser end
+    if (widget.drawingTool == DrawingTool.areaEraser && _isAreaEraserActive) {
+      _log('AreaEraser UP: ${_areaEraserPath.length} points in path');
+      _activePointerId = null;
+      _isPenDrawing = false;
+
+      // Close the path by connecting back to start
+      if (_areaEraserPath.length >= 3) {
+        // Find all strokes inside the area
+        final strokesToErase = <Stroke>[];
+        for (final stroke in _strokes) {
+          if (_isStrokeInLasso(stroke, _areaEraserPath)) {
+            strokesToErase.add(stroke);
+          }
+        }
+
+        if (strokesToErase.isNotEmpty) {
+          _saveState();
+          setState(() {
+            for (final stroke in strokesToErase) {
+              _strokes.removeWhere((s) => s.id == stroke.id);
+            }
+          });
+          widget.onStrokesChanged?.call(_strokes);
+          _log('AreaEraser: Erased ${strokesToErase.length} strokes');
+        }
+      }
+
+      setState(() {
+        _areaEraserPath.clear();
+        _isAreaEraserActive = false;
+      });
+      return;
+    }
+
     // Handle lasso end
     if (widget.drawingTool == DrawingTool.lasso) {
       _log('Lasso UP: ${_lassoPath.length} points in path');
@@ -2905,6 +3211,19 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _applySelectionMove();
         _isDraggingSelection = false;
         _selectionDragStart = null;
+        // 드래그 완료 후 선택이 유지되어 있으면 메뉴 다시 표시
+        if (_selectedStrokeIds.isNotEmpty) {
+          final bounds = _getSelectionBounds();
+          if (bounds != null) {
+            setState(() {
+              _showStrokeLassoMenu = true;
+              _strokeLongPressScreenPosition = Offset(
+                bounds.center.dx,
+                bounds.top - 30,
+              );
+            });
+          }
+        }
         return;
       }
 
@@ -2920,7 +3239,18 @@ class DrawingCanvasState extends State<DrawingCanvas> {
         _log('Lasso: Selected ${selectedIds.length} strokes');
         setState(() {
           _selectedStrokeIds = selectedIds;
-          // Keep the lasso path visible until next action
+          // 선택된 스트로크가 있으면 미니 툴바 표시
+          if (selectedIds.isNotEmpty) {
+            _showStrokeLassoMenu = true;
+            // 선택 영역의 중심점 계산
+            final bounds = _getSelectionBounds();
+            if (bounds != null) {
+              _strokeLongPressScreenPosition = Offset(
+                bounds.center.dx,
+                bounds.top - 30, // 선택 영역 위에 표시
+              );
+            }
+          }
         });
         _perfLog('LASSO SELECT', inputType: '${selectedIds.length} strokes');
       } else {
@@ -2941,8 +3271,28 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
     if (_currentStroke!.points.length >= 2) {
       _saveState();
+
+      // 도형 자동 인식 적용 (펜 도구에서만)
+      var finalStroke = _currentStroke!;
+      if (_currentStroke!.toolType == ToolType.pen) {
+        final (recognizedPoints, shapeType) = _smoothingService.recognizeAndCorrectShape(
+          _currentStroke!.points,
+        );
+        if (shapeType != null) {
+          finalStroke = Stroke(
+            id: _currentStroke!.id,
+            toolType: _currentStroke!.toolType,
+            color: _currentStroke!.color,
+            width: _currentStroke!.width,
+            points: recognizedPoints,
+            timestamp: _currentStroke!.timestamp,
+          );
+          _perfLog('SHAPE_RECOGNIZED', inputType: shapeType);
+        }
+      }
+
       setState(() {
-        _strokes.add(_currentStroke!);
+        _strokes.add(finalStroke);
         widget.onStrokesChanged?.call(_strokes);
       });
     }
@@ -2974,6 +3324,17 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _lastTimestamp = null;
     _lastErasePoint = null;
     setState(() {});
+  }
+
+  /// 펜 호버링 감지 - Palm Rejection 강화용
+  /// 펜이 화면 가까이에 있으면 손바닥 터치를 무시하도록 타임스탬프 업데이트
+  void _onPointerHover(PointerHoverEvent event) {
+    // 펜/스타일러스 호버링인 경우에만 처리
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus) {
+      _penHoverStartTime = DateTime.now().millisecondsSinceEpoch;
+      // _log('Pen hovering detected, updating hover timestamp');
+    }
   }
 
   StrokePoint _createStrokePoint(PointerEvent event, double velocity, [Offset? canvasPos]) {
@@ -3373,6 +3734,462 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     widget.onStrokesChanged?.call(_strokes);
   }
 
+  /// Change color of selected strokes
+  void changeSelectionColor(Color newColor) {
+    if (_selectedStrokeIds.isEmpty) return;
+    _saveState();
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: newColor,
+            width: stroke.width,
+            points: stroke.points,
+            timestamp: stroke.timestamp,
+          );
+        }
+      }
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Change width of selected strokes
+  void changeSelectionWidth(double newWidth) {
+    if (_selectedStrokeIds.isEmpty) return;
+    _saveState();
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: stroke.color,
+            width: newWidth,
+            points: stroke.points,
+            timestamp: stroke.timestamp,
+          );
+        }
+      }
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Change both color and width of selected strokes
+  void changeSelectionStyle({Color? newColor, double? newWidth}) {
+    if (_selectedStrokeIds.isEmpty) return;
+    if (newColor == null && newWidth == null) return;
+    _saveState();
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: newColor ?? stroke.color,
+            width: newWidth ?? stroke.width,
+            points: stroke.points,
+            timestamp: stroke.timestamp,
+          );
+        }
+      }
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Rotate selected strokes by angle (in degrees)
+  void rotateSelection(double angleDegrees) {
+    if (_selectedStrokeIds.isEmpty) return;
+    _saveState();
+
+    final bounds = _getSelectionBounds();
+    if (bounds == null) return;
+
+    final center = bounds.center;
+    final angleRadians = angleDegrees * (3.141592653589793 / 180);
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          final rotatedPoints = stroke.points.map((p) {
+            // Translate to origin, rotate, translate back
+            final dx = p.x - center.dx;
+            final dy = p.y - center.dy;
+            final cos = math.cos(angleRadians);
+            final sin = math.sin(angleRadians);
+            return StrokePoint(
+              x: center.dx + dx * cos - dy * sin,
+              y: center.dy + dx * sin + dy * cos,
+              pressure: p.pressure,
+              tilt: p.tilt,
+              timestamp: p.timestamp,
+            );
+          }).toList();
+
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: stroke.color,
+            width: stroke.width,
+            points: rotatedPoints,
+            timestamp: stroke.timestamp,
+          );
+        }
+      }
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+
+  /// Scale selected strokes by factor
+  void scaleSelection(double factor) {
+    if (_selectedStrokeIds.isEmpty || factor <= 0) return;
+    _saveState();
+
+    final bounds = _getSelectionBounds();
+    if (bounds == null) return;
+
+    final center = bounds.center;
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          final scaledPoints = stroke.points.map((p) {
+            // Scale from center
+            final dx = p.x - center.dx;
+            final dy = p.y - center.dy;
+            return StrokePoint(
+              x: center.dx + dx * factor,
+              y: center.dy + dy * factor,
+              pressure: p.pressure,
+              tilt: p.tilt,
+              timestamp: p.timestamp,
+            );
+          }).toList();
+
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: stroke.color,
+            width: stroke.width * factor, // 굵기도 비례 조정
+            points: scaledPoints,
+            timestamp: stroke.timestamp,
+          );
+        }
+      }
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// Show transform panel (rotate/scale) - 화면 하단에 표시하여 선택 영역이 보이도록
+  void _showTransformDialog() {
+    // 원본 스트로크 저장 (취소 시 복원용)
+    final originalStrokes = _strokes.map((s) => Stroke(
+      id: s.id,
+      toolType: s.toolType,
+      color: s.color,
+      width: s.width,
+      points: s.points.toList(),
+      timestamp: s.timestamp,
+      isShape: s.isShape,
+      shapeType: s.shapeType,
+    )).toList();
+
+    double rotationAngle = 0;
+    double scaleFactor = 1.0;
+    double lastAppliedRotation = 0;
+    double lastAppliedScale = 1.0;
+
+    // 올가미 메뉴 숨기기
+    setState(() {
+      _showStrokeLassoMenu = false;
+    });
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.transparent, // 배경 투명하게 하여 선택 영역이 보이도록
+      isDismissible: false, // 바깥 터치로 닫히지 않도록
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          // 실시간 변환 적용 함수
+          void applyTransformPreview() {
+            // 델타 계산 (이전 적용값과의 차이)
+            final deltaRotation = rotationAngle - lastAppliedRotation;
+            final deltaScale = scaleFactor / lastAppliedScale;
+
+            if (deltaRotation != 0) {
+              _rotateSelectionImmediate(deltaRotation);
+              lastAppliedRotation = rotationAngle;
+            }
+            if (deltaScale != 1.0) {
+              _scaleSelectionImmediate(deltaScale);
+              lastAppliedScale = scaleFactor;
+            }
+          }
+
+          return Container(
+            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.15),
+                  blurRadius: 8,
+                  offset: const Offset(0, -2),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 헤더 + 버튼
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.1),
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.transform, color: Colors.blue, size: 18),
+                      const SizedBox(width: 6),
+                      const Text('변형', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      const Spacer(),
+                      // 취소 버튼
+                      TextButton(
+                        onPressed: () {
+                          // 원본으로 복원
+                          setState(() {
+                            _strokes = originalStrokes;
+                          });
+                          widget.onStrokesChanged?.call(_strokes);
+                          Navigator.pop(sheetContext);
+                          // 올가미 메뉴 다시 표시
+                          final bounds = _getSelectionBounds();
+                          if (bounds != null && _selectedStrokeIds.isNotEmpty) {
+                            setState(() {
+                              _showStrokeLassoMenu = true;
+                              _strokeLongPressScreenPosition = Offset(bounds.center.dx, bounds.top - 30);
+                            });
+                          }
+                        },
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          minimumSize: Size.zero,
+                        ),
+                        child: const Text('취소', style: TextStyle(fontSize: 12)),
+                      ),
+                      const SizedBox(width: 4),
+                      // 완료 버튼
+                      ElevatedButton(
+                        onPressed: () {
+                          // 변형 확정 (이미 적용됨)
+                          _saveState();
+                          Navigator.pop(sheetContext);
+                          _closeStrokeLassoMenu();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          minimumSize: Size.zero,
+                          backgroundColor: Colors.blue,
+                        ),
+                        child: const Text('완료', style: TextStyle(color: Colors.white, fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 회전 슬라이더 (컴팩트)
+                      Row(
+                        children: [
+                          const Icon(Icons.rotate_right, size: 16, color: Colors.blue),
+                          Expanded(
+                            child: SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                trackHeight: 3,
+                                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                              ),
+                              child: Slider(
+                                value: rotationAngle,
+                                min: -180,
+                                max: 180,
+                                divisions: 72,
+                                activeColor: Colors.blue,
+                                onChanged: (value) {
+                                  setSheetState(() => rotationAngle = value);
+                                  applyTransformPreview();
+                                },
+                              ),
+                            ),
+                          ),
+                          Container(
+                            width: 40,
+                            alignment: Alignment.center,
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              '${rotationAngle.round()}°',
+                              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 11),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      // 크기 슬라이더 (컴팩트)
+                      Row(
+                        children: [
+                          const Icon(Icons.photo_size_select_small, size: 16, color: Colors.green),
+                          Expanded(
+                            child: SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                trackHeight: 3,
+                                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                              ),
+                              child: Slider(
+                                value: scaleFactor,
+                                min: 0.25,
+                                max: 3.0,
+                                divisions: 55,
+                                activeColor: Colors.green,
+                                onChanged: (value) {
+                                  setSheetState(() => scaleFactor = value);
+                                  applyTransformPreview();
+                                },
+                              ),
+                            ),
+                          ),
+                          Container(
+                            width: 40,
+                            alignment: Alignment.center,
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.green.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              '${(scaleFactor * 100).round()}%',
+                              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 11),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 실시간 회전 적용 (Undo 스택에 저장하지 않음)
+  void _rotateSelectionImmediate(double angleDegrees) {
+    if (_selectedStrokeIds.isEmpty) return;
+
+    final bounds = _getSelectionBounds();
+    if (bounds == null) return;
+
+    final center = bounds.center;
+    final angleRadians = angleDegrees * (3.141592653589793 / 180);
+    final cos = math.cos(angleRadians);
+    final sin = math.sin(angleRadians);
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          final rotatedPoints = stroke.points.map((p) {
+            final dx = p.x - center.dx;
+            final dy = p.y - center.dy;
+            return StrokePoint(
+              x: center.dx + dx * cos - dy * sin,
+              y: center.dy + dx * sin + dy * cos,
+              pressure: p.pressure,
+              tilt: p.tilt,
+              timestamp: p.timestamp,
+            );
+          }).toList();
+
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: stroke.color,
+            width: stroke.width,
+            points: rotatedPoints,
+            timestamp: stroke.timestamp,
+            isShape: stroke.isShape,
+            shapeType: stroke.shapeType,
+          );
+        }
+      }
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// 실시간 크기 조절 적용 (Undo 스택에 저장하지 않음)
+  void _scaleSelectionImmediate(double factor) {
+    if (_selectedStrokeIds.isEmpty || factor == 1.0) return;
+
+    final bounds = _getSelectionBounds();
+    if (bounds == null) return;
+
+    final center = bounds.center;
+
+    setState(() {
+      for (int i = 0; i < _strokes.length; i++) {
+        if (_selectedStrokeIds.contains(_strokes[i].id)) {
+          final stroke = _strokes[i];
+          final scaledPoints = stroke.points.map((p) {
+            final dx = p.x - center.dx;
+            final dy = p.y - center.dy;
+            return StrokePoint(
+              x: center.dx + dx * factor,
+              y: center.dy + dy * factor,
+              pressure: p.pressure,
+              tilt: p.tilt,
+              timestamp: p.timestamp,
+            );
+          }).toList();
+
+          _strokes[i] = Stroke(
+            id: stroke.id,
+            toolType: stroke.toolType,
+            color: stroke.color,
+            width: stroke.width,
+            points: scaledPoints,
+            timestamp: stroke.timestamp,
+            isShape: stroke.isShape,
+            shapeType: stroke.shapeType,
+          );
+        }
+      }
+    });
+    widget.onStrokesChanged?.call(_strokes);
+  }
+
   /// Copy selected strokes (creates duplicates offset by 20 pixels)
   void copySelection() {
     if (_selectedStrokeIds.isEmpty) return;
@@ -3443,6 +4260,379 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _lassoPath.clear();
     });
     widget.onStrokesChanged?.call(_strokes);
+  }
+
+  /// 주어진 위치에 스트로크가 있는지 확인하고 해당 스트로크 ID 반환
+  /// tolerance: 터치 허용 범위 (픽셀)
+  String? _findStrokeAtPosition(Offset canvasPos, {double tolerance = 15.0}) {
+    // 뒤에서부터 검색 (최상위 스트로크 우선)
+    for (int i = _strokes.length - 1; i >= 0; i--) {
+      final stroke = _strokes[i];
+      if (_isPointOnStroke(canvasPos, stroke, tolerance: tolerance)) {
+        return stroke.id;
+      }
+    }
+    return null;
+  }
+
+  /// 점이 스트로크 위에 있는지 확인
+  bool _isPointOnStroke(Offset point, Stroke stroke, {double tolerance = 15.0}) {
+    if (stroke.points.isEmpty) return false;
+
+    // 스트로크 폭을 고려한 실제 허용 범위
+    final effectiveTolerance = tolerance + (stroke.width / 2);
+
+    // 빠른 바운딩 박스 체크
+    double minX = double.infinity, minY = double.infinity;
+    double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+    for (final p in stroke.points) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+
+    // 바운딩 박스 밖이면 빠르게 반환
+    if (point.dx < minX - effectiveTolerance ||
+        point.dx > maxX + effectiveTolerance ||
+        point.dy < minY - effectiveTolerance ||
+        point.dy > maxY + effectiveTolerance) {
+      return false;
+    }
+
+    // 각 선분에 대해 점과의 거리 확인
+    for (int i = 0; i < stroke.points.length - 1; i++) {
+      final p1 = Offset(stroke.points[i].x, stroke.points[i].y);
+      final p2 = Offset(stroke.points[i + 1].x, stroke.points[i + 1].y);
+
+      final distance = _pointToLineDistance(point, p1, p2);
+      if (distance <= effectiveTolerance) {
+        return true;
+      }
+    }
+
+    // 단일 점인 경우
+    if (stroke.points.length == 1) {
+      final p = Offset(stroke.points[0].x, stroke.points[0].y);
+      return (point - p).distance <= effectiveTolerance;
+    }
+
+    return false;
+  }
+
+  /// 점에서 선분까지의 최단 거리 계산
+  double _pointToLineDistance(Offset point, Offset lineStart, Offset lineEnd) {
+    final dx = lineEnd.dx - lineStart.dx;
+    final dy = lineEnd.dy - lineStart.dy;
+    final lengthSquared = dx * dx + dy * dy;
+
+    if (lengthSquared == 0) {
+      // 선분이 점인 경우
+      return (point - lineStart).distance;
+    }
+
+    // 선분 위의 가장 가까운 점의 파라미터 t (0~1)
+    var t = ((point.dx - lineStart.dx) * dx + (point.dy - lineStart.dy) * dy) / lengthSquared;
+    t = t.clamp(0.0, 1.0);
+
+    // 가장 가까운 점
+    final closestPoint = Offset(
+      lineStart.dx + t * dx,
+      lineStart.dy + t * dy,
+    );
+
+    return (point - closestPoint).distance;
+  }
+
+  /// 스트로크 롱프레스 타이머 시작
+  void _startStrokeLongPressTimer(Offset canvasPos, Offset screenPos, String strokeId) {
+    _cancelStrokeLongPressTimer();
+    _strokeLongPressPosition = canvasPos;
+    _strokeLongPressScreenPosition = screenPos;
+    _longPressedStrokeId = strokeId;
+
+    _strokeLongPressTimer = Timer(Duration(milliseconds: _strokeLongPressDuration), () {
+      if (mounted && _longPressedStrokeId != null) {
+        // 현재 그리던 스트로크 취소
+        _currentStroke = null;
+
+        setState(() {
+          // 해당 스트로크 자동 선택
+          _selectedStrokeIds = {_longPressedStrokeId!};
+          // 미니 툴바 표시
+          _showStrokeLassoMenu = true;
+        });
+
+        // 디버그 로그
+        debugPrint('롱프레스 스트로크 선택: strokeId=$_longPressedStrokeId');
+      }
+    });
+  }
+
+  /// 스트로크 롱프레스 타이머 취소
+  void _cancelStrokeLongPressTimer() {
+    _strokeLongPressTimer?.cancel();
+    _strokeLongPressTimer = null;
+    _strokeLongPressPosition = null;
+    _longPressedStrokeId = null;
+  }
+
+  /// 올가미 메뉴 닫기
+  void _closeStrokeLassoMenu() {
+    if (_showStrokeLassoMenu) {
+      setState(() {
+        _showStrokeLassoMenu = false;
+        _strokeLongPressScreenPosition = null;
+      });
+    }
+  }
+
+  /// 선택된 스트로크 글씨 변경 패널 (색상 + 굵기) - 화면 하단에 표시하여 선택 영역이 보이도록
+  void _showStrokeEditDialog() {
+    // 선택된 스트로크들의 현재 굵기 평균값 가져오기
+    double currentWidth = 2.0;
+    Color? currentColor;
+    if (_selectedStrokeIds.isNotEmpty) {
+      final selectedList = _strokes.where((s) => _selectedStrokeIds.contains(s.id)).toList();
+      if (selectedList.isNotEmpty) {
+        currentWidth = selectedList.map((s) => s.width).reduce((a, b) => a + b) / selectedList.length;
+        // 선택된 스트로크들의 색상이 모두 같으면 그 색상 표시
+        final firstColor = selectedList.first.color;
+        if (selectedList.every((s) => s.color == firstColor)) {
+          currentColor = firstColor;
+        }
+      }
+    }
+
+    // 원본 스트로크 저장 (취소 시 복원용)
+    final originalStrokes = _strokes.map((s) => Stroke(
+      id: s.id,
+      toolType: s.toolType,
+      color: s.color,
+      width: s.width,
+      points: s.points.toList(),
+      timestamp: s.timestamp,
+      isShape: s.isShape,
+      shapeType: s.shapeType,
+    )).toList();
+
+    Color selectedColor = currentColor ?? Colors.black;
+    double selectedWidth = currentWidth;
+
+    final colors = [
+      Colors.black,
+      Colors.white,
+      Colors.grey,
+      Colors.red,
+      Colors.orange,
+      Colors.amber,
+      Colors.yellow,
+      Colors.green,
+      Colors.teal,
+      Colors.blue,
+      Colors.indigo,
+      Colors.purple,
+      Colors.pink,
+      Colors.brown,
+      const Color(0xFF1976D2), // Blue 700
+      const Color(0xFFD32F2F), // Red 700
+    ];
+
+    // 올가미 메뉴 숨기기
+    setState(() {
+      _showStrokeLassoMenu = false;
+    });
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.transparent, // 배경 투명하게 하여 선택 영역이 보이도록
+      isDismissible: false, // 바깥 터치로 닫히지 않도록
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          // 실시간 스타일 적용 함수 (Undo 스택에 저장하지 않음)
+          void applyStylePreview(Color color, double width) {
+            // 선택된 스트로크에 즉시 스타일 적용
+            for (int i = 0; i < _strokes.length; i++) {
+              if (_selectedStrokeIds.contains(_strokes[i].id)) {
+                final stroke = _strokes[i];
+                _strokes[i] = Stroke(
+                  id: stroke.id,
+                  toolType: stroke.toolType,
+                  color: color,
+                  width: width,
+                  points: stroke.points,
+                  timestamp: stroke.timestamp,
+                  isShape: stroke.isShape,
+                  shapeType: stroke.shapeType,
+                );
+              }
+            }
+            // 캔버스 위젯의 setState 호출하여 다시 그리기
+            // _strokeContentVersion 증가로 RepaintBoundary Key 변경 → 강제 repaint
+            setState(() {
+              _strokeContentVersion++;
+            });
+            widget.onStrokesChanged?.call(_strokes);
+          }
+
+          return Container(
+            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.15),
+                  blurRadius: 8,
+                  offset: const Offset(0, -2),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 헤더 + 닫기 버튼
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withOpacity(0.1),
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.edit, color: Colors.amber, size: 18),
+                      const SizedBox(width: 6),
+                      const Text('글씨 변경', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      const Spacer(),
+                      // 취소 버튼
+                      TextButton(
+                        onPressed: () {
+                          // 취소: 원본으로 복원
+                          setState(() {
+                            _strokes.clear();
+                            _strokes.addAll(originalStrokes);
+                          });
+                          widget.onStrokesChanged?.call(_strokes);
+                          Navigator.pop(sheetContext);
+                          setState(() {
+                            _showStrokeLassoMenu = true;
+                          });
+                        },
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          minimumSize: Size.zero,
+                        ),
+                        child: const Text('취소', style: TextStyle(fontSize: 12)),
+                      ),
+                      const SizedBox(width: 4),
+                      // 완료 버튼
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(sheetContext);
+                          _closeStrokeLassoMenu();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          minimumSize: Size.zero,
+                          backgroundColor: Colors.amber,
+                        ),
+                        child: const Text('완료', style: TextStyle(color: Colors.white, fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 색상 팔레트 (컴팩트)
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: colors.map((color) {
+                          final isSelected = selectedColor == color;
+                          return GestureDetector(
+                            onTap: () {
+                              setSheetState(() => selectedColor = color);
+                              applyStylePreview(color, selectedWidth);
+                            },
+                            child: Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: color,
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: isSelected ? Colors.blue : (color == Colors.white ? Colors.grey[400]! : Colors.transparent),
+                                  width: isSelected ? 2 : 1,
+                                ),
+                                boxShadow: isSelected ? [
+                                  BoxShadow(
+                                    color: Colors.blue.withOpacity(0.4),
+                                    blurRadius: 4,
+                                    spreadRadius: 1,
+                                  ),
+                                ] : null,
+                              ),
+                              child: isSelected
+                                  ? Icon(Icons.check, color: color == Colors.white || color == Colors.yellow || color == Colors.amber ? Colors.black : Colors.white, size: 14)
+                                  : null,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 10),
+                      // 굵기 슬라이더 (컴팩트)
+                      Row(
+                        children: [
+                          const Icon(Icons.line_weight, size: 16, color: Colors.orange),
+                          Expanded(
+                            child: SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                trackHeight: 3,
+                                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                              ),
+                              child: Slider(
+                                value: selectedWidth,
+                                min: 0.5,
+                                max: 20.0,
+                                divisions: 39,
+                                activeColor: Colors.orange,
+                                onChanged: (value) {
+                                  setSheetState(() => selectedWidth = value);
+                                  applyStylePreview(selectedColor, value);
+                                },
+                              ),
+                            ),
+                          ),
+                          Container(
+                            width: 36,
+                            alignment: Alignment.center,
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              selectedWidth.toStringAsFixed(1),
+                              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.orange, fontSize: 11),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   /// Check if a point is inside the lasso polygon
@@ -4060,6 +5250,105 @@ class _LassoOverlayPainter extends CustomPainter {
         scale != oldDelegate.scale ||
         offset != oldDelegate.offset ||
         lassoColor != oldDelegate.lassoColor;
+  }
+}
+
+/// Area eraser overlay painter - draws the area being selected for erasure
+class _AreaEraserOverlayPainter extends CustomPainter {
+  final List<Offset> path;
+  final double scale;
+  final Offset offset;
+
+  _AreaEraserOverlayPainter({
+    required this.path,
+    required this.scale,
+    required this.offset,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (path.isEmpty) return;
+
+    // Convert canvas coordinates to screen coordinates
+    final screenPath = path.map((p) {
+      return Offset(
+        p.dx * scale + offset.dx,
+        p.dy * scale + offset.dy,
+      );
+    }).toList();
+
+    // Draw area eraser path with red color
+    final paint = Paint()
+      ..color = Colors.red.withOpacity(0.8)
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    // White outline for visibility
+    final outlinePaint = Paint()
+      ..color = Colors.white.withOpacity(0.9)
+      ..strokeWidth = 4.0
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    // Fill the area with semi-transparent red
+    final fillPaint = Paint()
+      ..color = Colors.red.withOpacity(0.1)
+      ..style = PaintingStyle.fill;
+
+    if (screenPath.length >= 2) {
+      final pathObj = Path();
+      pathObj.moveTo(screenPath.first.dx, screenPath.first.dy);
+      for (int i = 1; i < screenPath.length; i++) {
+        pathObj.lineTo(screenPath[i].dx, screenPath[i].dy);
+      }
+
+      // Close the path for fill
+      if (screenPath.length >= 3) {
+        pathObj.close();
+        canvas.drawPath(pathObj, fillPaint);
+      }
+
+      // Draw the stroke
+      final strokePath = Path();
+      strokePath.moveTo(screenPath.first.dx, screenPath.first.dy);
+      for (int i = 1; i < screenPath.length; i++) {
+        strokePath.lineTo(screenPath[i].dx, screenPath[i].dy);
+      }
+      canvas.drawPath(strokePath, outlinePaint);
+      canvas.drawPath(strokePath, paint);
+    }
+
+    // Draw start point indicator
+    final startPaint = Paint()
+      ..color = Colors.red
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(screenPath.first, 6.0, startPaint);
+
+    // Draw X mark in the start point
+    final xPaint = Paint()
+      ..color = Colors.white
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final center = screenPath.first;
+    canvas.drawLine(Offset(center.dx - 3, center.dy - 3), Offset(center.dx + 3, center.dy + 3), xPaint);
+    canvas.drawLine(Offset(center.dx + 3, center.dy - 3), Offset(center.dx - 3, center.dy + 3), xPaint);
+
+    // Draw current point indicator
+    final currentPaint = Paint()
+      ..color = Colors.red.withOpacity(0.6)
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(screenPath.last, 4.0, currentPaint);
+  }
+
+  @override
+  bool shouldRepaint(_AreaEraserOverlayPainter oldDelegate) {
+    return path.length != oldDelegate.path.length ||
+        scale != oldDelegate.scale ||
+        offset != oldDelegate.offset;
   }
 }
 

@@ -286,6 +286,160 @@ class StrokeSmoothingService {
     final cosAngle = (dot / (mag1 * mag2)).clamp(-1.0, 1.0);
     return math.acos(cosAngle) * 180 / math.pi;
   }
+
+  /// 도형 자동 인식 설정
+  bool _shapeRecognitionEnabled = false;
+  bool get shapeRecognitionEnabled => _shapeRecognitionEnabled;
+  set shapeRecognitionEnabled(bool value) => _shapeRecognitionEnabled = value;
+
+  /// 도형 인식이 적용된 스트로크 반환 (직선/원 자동 교정)
+  /// 원본 스트로크와 인식된 도형 타입을 함께 반환
+  (List<StrokePoint>, String?) recognizeAndCorrectShape(List<StrokePoint> points) {
+    if (!_shapeRecognitionEnabled || points.length < 5) {
+      return (points, null);
+    }
+
+    // 직선 인식 체크
+    if (_isLikelyLine(points)) {
+      return (_correctToLine(points), 'line');
+    }
+
+    // 원/타원 인식 체크
+    if (_isLikelyClosed(points) && _isLikelyCircle(points)) {
+      return (_correctToEllipse(points), 'circle');
+    }
+
+    return (points, null);
+  }
+
+  /// 직선 여부 판정 (선형 회귀로 R² 계산)
+  bool _isLikelyLine(List<StrokePoint> points) {
+    if (points.length < 3) return false;
+
+    // 시작점과 끝점 거리
+    final startEnd = _distance(points.first, points.last);
+    if (startEnd < 30) return false; // 너무 짧은 스트로크는 제외
+
+    // 모든 포인트의 직선으로부터의 평균 거리 계산
+    double totalDeviation = 0;
+    for (final point in points) {
+      totalDeviation += _perpendicularDistance(point, points.first, points.last);
+    }
+    final avgDeviation = totalDeviation / points.length;
+
+    // 평균 편차가 선 길이의 5% 이하면 직선으로 인식
+    return avgDeviation < startEnd * 0.05;
+  }
+
+  /// 직선으로 교정
+  List<StrokePoint> _correctToLine(List<StrokePoint> points) {
+    if (points.isEmpty) return points;
+
+    final start = points.first;
+    final end = points.last;
+
+    // 시작점과 끝점만 유지 (직선)
+    return [
+      start,
+      StrokePoint(
+        x: end.x,
+        y: end.y,
+        pressure: end.pressure,
+        tilt: end.tilt,
+        timestamp: end.timestamp,
+      ),
+    ];
+  }
+
+  /// 닫힌 도형 여부 (시작점과 끝점이 가까움)
+  bool _isLikelyClosed(List<StrokePoint> points) {
+    if (points.length < 10) return false;
+
+    final start = points.first;
+    final end = points.last;
+    final distance = _distance(start, end);
+
+    // 전체 경로 길이 계산
+    double totalLength = 0;
+    for (int i = 1; i < points.length; i++) {
+      totalLength += _distance(points[i - 1], points[i]);
+    }
+
+    // 시작-끝 거리가 전체 길이의 15% 이하면 닫힌 도형
+    return distance < totalLength * 0.15;
+  }
+
+  /// 원 여부 판정 (중심점으로부터의 거리 분산 체크)
+  bool _isLikelyCircle(List<StrokePoint> points) {
+    if (points.length < 10) return false;
+
+    // 바운딩 박스로 중심점 계산
+    double minX = double.infinity, maxX = double.negativeInfinity;
+    double minY = double.infinity, maxY = double.negativeInfinity;
+
+    for (final p in points) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+
+    final centerX = (minX + maxX) / 2;
+    final centerY = (minY + maxY) / 2;
+    final avgRadius = ((maxX - minX) + (maxY - minY)) / 4;
+
+    if (avgRadius < 20) return false; // 너무 작은 원은 제외
+
+    // 각 포인트의 중심으로부터의 거리 분산 계산
+    double sumSquaredDiff = 0;
+    for (final p in points) {
+      final dist = math.sqrt(math.pow(p.x - centerX, 2) + math.pow(p.y - centerY, 2));
+      sumSquaredDiff += math.pow(dist - avgRadius, 2);
+    }
+    final variance = sumSquaredDiff / points.length;
+    final stdDev = math.sqrt(variance);
+
+    // 표준편차가 평균 반지름의 15% 이하면 원으로 인식
+    return stdDev < avgRadius * 0.15;
+  }
+
+  /// 타원으로 교정
+  List<StrokePoint> _correctToEllipse(List<StrokePoint> points) {
+    if (points.isEmpty) return points;
+
+    // 바운딩 박스로 타원 파라미터 계산
+    double minX = double.infinity, maxX = double.negativeInfinity;
+    double minY = double.infinity, maxY = double.negativeInfinity;
+
+    for (final p in points) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+
+    final centerX = (minX + maxX) / 2;
+    final centerY = (minY + maxY) / 2;
+    final radiusX = (maxX - minX) / 2;
+    final radiusY = (maxY - minY) / 2;
+
+    // 타원 위의 점들 생성 (36개 포인트)
+    final result = <StrokePoint>[];
+    final avgPressure = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
+
+    for (int i = 0; i <= 36; i++) {
+      final angle = (i / 36) * 2 * math.pi;
+      result.add(StrokePoint(
+        x: centerX + radiusX * math.cos(angle),
+        y: centerY + radiusY * math.sin(angle),
+        pressure: avgPressure,
+        tilt: 0,
+        timestamp: points.first.timestamp + i,
+      ));
+    }
+
+    return result;
+  }
 }
 
 /// 스무딩 파라미터
