@@ -1,4 +1,5 @@
 import 'dart:ui';
+import 'dart:math' as math;
 
 import 'stroke_point.dart';
 import 'bounding_box.dart';
@@ -92,12 +93,41 @@ class Stroke {
     }
   }
 
-  /// 압력에 따른 실제 굵기 계산
+  /// 압력에 따른 실제 굵기 계산 (비선형 곡선 적용)
+  /// - 시그모이드 곡선으로 자연스러운 필압 반응
+  /// - 낮은 압력에서는 완만하게, 중간에서 급격히, 높은 압력에서 다시 완만
   double getWidthAtPressure(double pressure) {
     // 압력 범위: 0.0 ~ 1.0
-    // 굵기 배율: 0.5x ~ 2.0x
-    final multiplier = 0.5 + pressure * 1.5;
+    final clampedPressure = pressure.clamp(0.0, 1.0);
+
+    // 비선형 곡선 (파워 곡선) - 더 자연스러운 필기감
+    // pow(pressure, 0.6)은 낮은 압력에서 반응성을 높이고
+    // 높은 압력에서 부드러운 전환을 제공
+    final curved = math.pow(clampedPressure, 0.6);
+
+    // 굵기 배율: 0.3x ~ 1.8x (기존보다 더 넓은 범위)
+    final multiplier = 0.3 + curved * 1.5;
     return width * multiplier;
+  }
+
+  /// 틸트(기울기)에 따른 브러시 굵기 변형
+  /// - 펜을 기울이면 선이 두꺼워지는 실제 펜 효과
+  /// - tilt: 0 = 수직, 1 = 최대 기울기
+  double getWidthWithTilt(double pressure, double tilt) {
+    final baseWidth = getWidthAtPressure(pressure);
+
+    // 틸트에 따른 굵기 증가 (최대 1.5배)
+    // 기울기가 클수록 브러시 접촉면이 넓어지는 효과
+    final tiltMultiplier = 1.0 + (tilt.clamp(0.0, 1.0) * 0.5);
+
+    return baseWidth * tiltMultiplier;
+  }
+
+  /// 틸트에 따른 브러시 각도 계산 (라디안)
+  /// - 펜 기울기 방향으로 브러시 각도 결정
+  double getBrushAngle(double tiltX, double tiltY) {
+    if (tiltX == 0 && tiltY == 0) return 0;
+    return math.atan2(tiltY, tiltX);
   }
 
   /// 복사본 생성

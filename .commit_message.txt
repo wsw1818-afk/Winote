@@ -1,1 +1,1 @@
-🔥 중복 pdf_service.dart 삭제 (이미 pdf_export_service, pdf_import_service 존재)
+✨ 필기 품질 대폭 개선: 비선형 필압 + 테이퍼 + 지우개 미리보기 + 캐시 통합

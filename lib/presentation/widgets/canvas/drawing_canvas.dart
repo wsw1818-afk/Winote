@@ -12,6 +12,7 @@ import '../../../domain/entities/canvas_shape.dart';
 import '../../../domain/entities/canvas_table.dart';
 import '../../../core/services/windows_pointer_service.dart';
 import '../../../core/services/stroke_smoothing_service.dart';
+import '../../../core/services/stroke_cache_service.dart';
 import '../../../core/providers/drawing_state.dart';
 
 /// Drawing Canvas Widget
@@ -132,6 +133,13 @@ class DrawingCanvasState extends State<DrawingCanvas> {
 
   // Stroke smoothing service (필기 보정)
   final StrokeSmoothingService _smoothingService = StrokeSmoothingService.instance;
+
+  // Stroke cache service (래스터 캐싱)
+  final StrokeCacheService _cacheService = StrokeCacheService.instance;
+
+  // 캐시된 스트로크 이미지 (성능 최적화)
+  ui.Image? _cachedStrokesImage;
+  bool _needsCacheUpdate = true;
 
   // Zoom and Pan (for finger gestures)
   double _scale = 1.0;
@@ -359,6 +367,10 @@ class DrawingCanvasState extends State<DrawingCanvas> {
     _loadedBackgroundImage?.dispose();
     _loadedBackgroundImage = null;
 
+    // 스트로크 캐시 정리
+    _cachedStrokesImage?.dispose();
+    _cachedStrokesImage = null;
+
     super.dispose();
   }
 
@@ -512,6 +524,14 @@ class DrawingCanvasState extends State<DrawingCanvas> {
       _undoStack.removeAt(0);
     }
     _redoStack.clear();
+    // 캐시 무효화
+    _invalidateStrokeCache();
+  }
+
+  /// 스트로크 캐시 무효화 (스트로크 변경 시 호출)
+  void _invalidateStrokeCache() {
+    _needsCacheUpdate = true;
+    _cacheService.invalidateCache();
   }
 
   Future<void> _initLogFile() async {
@@ -5728,13 +5748,47 @@ class _StrokePainter extends CustomPainter {
       _drawStrokeFast(canvas, currentStroke!);
     }
 
-    // Draw eraser cursor
+    // Draw eraser cursor with preview of strokes to be erased
     if (eraserPosition != null) {
-      final eraserPaint = Paint()
-        ..color = Colors.grey.withOpacity(0.5)
+      // 1. 먼저 지워질 스트로크 하이라이트 (빨간색 표시)
+      for (final stroke in strokes) {
+        if (_isStrokeInEraserRange(stroke, eraserPosition!, eraserRadius)) {
+          _drawEraserPreviewHighlight(canvas, stroke, eraserPosition!, eraserRadius);
+        }
+      }
+
+      // 2. 지우개 커서 그리기 (외곽선 + 반투명 내부)
+      final eraserFillPaint = Paint()
+        ..color = Colors.white.withOpacity(0.3)
+        ..style = PaintingStyle.fill;
+
+      final eraserStrokePaint = Paint()
+        ..color = Colors.grey[600]!
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2.0;
-      canvas.drawCircle(eraserPosition!, eraserRadius, eraserPaint);
+
+      // X 표시가 있는 지우개 아이콘
+      canvas.drawCircle(eraserPosition!, eraserRadius, eraserFillPaint);
+      canvas.drawCircle(eraserPosition!, eraserRadius, eraserStrokePaint);
+
+      // 지우개 내부에 작은 X 표시
+      final xSize = eraserRadius * 0.4;
+      final xPaint = Paint()
+        ..color = Colors.grey[500]!
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..strokeCap = StrokeCap.round;
+
+      canvas.drawLine(
+        Offset(eraserPosition!.dx - xSize, eraserPosition!.dy - xSize),
+        Offset(eraserPosition!.dx + xSize, eraserPosition!.dy + xSize),
+        xPaint,
+      );
+      canvas.drawLine(
+        Offset(eraserPosition!.dx + xSize, eraserPosition!.dy - xSize),
+        Offset(eraserPosition!.dx - xSize, eraserPosition!.dy + xSize),
+        xPaint,
+      );
     }
 
     // Draw shape preview
@@ -5865,7 +5919,7 @@ class _StrokePainter extends CustomPainter {
     }
   }
 
-  /// Fast stroke drawing - no spline interpolation, just direct lines
+  /// Fast stroke drawing with improved pressure and taper
   void _drawStrokeFast(Canvas canvas, Stroke stroke, {Offset offset = Offset.zero, bool highlight = false}) {
     if (stroke.points.isEmpty) return;
 
@@ -5875,16 +5929,26 @@ class _StrokePainter extends CustomPainter {
       ..strokeJoin = StrokeJoin.round
       ..style = PaintingStyle.stroke;
 
-    // Single point: draw circle
+    // Single point: draw circle with pressure-based size
     if (stroke.points.length == 1) {
       final point = stroke.points[0];
-      final pressure = point.pressure.clamp(0.1, 1.0);
-      paint.strokeWidth = stroke.width * (0.5 + pressure * 0.5);
-      canvas.drawCircle(Offset(point.x + offset.dx, point.y + offset.dy), paint.strokeWidth / 2, paint);
+      final width = stroke.getWidthAtPressure(point.pressure);
+      paint.style = PaintingStyle.fill;
+      canvas.drawCircle(
+        Offset(point.x + offset.dx, point.y + offset.dy),
+        width / 2,
+        paint,
+      );
       return;
     }
 
-    // Use Path for efficient batch drawing
+    // 도형이 아닌 경우: 가변 굵기로 자연스러운 획 렌더링
+    if (!stroke.isShape && stroke.points.length >= 2) {
+      _drawVariableWidthStroke(canvas, stroke, offset, highlight);
+      return;
+    }
+
+    // 도형 또는 짧은 스트로크: 기존 Path 방식
     final path = Path();
     final firstPoint = stroke.points.first;
     path.moveTo(firstPoint.x + offset.dx, firstPoint.y + offset.dy);
@@ -5895,7 +5959,7 @@ class _StrokePainter extends CustomPainter {
       totalPressure += p.pressure;
     }
     final avgPressure = (totalPressure / stroke.points.length).clamp(0.1, 1.0);
-    paint.strokeWidth = stroke.width * (0.5 + avgPressure * 0.5);
+    paint.strokeWidth = stroke.getWidthAtPressure(avgPressure);
 
     // 도형인 경우 타입에 따라 다르게 그림
     if (stroke.isShape) {
@@ -5972,6 +6036,146 @@ class _StrokePainter extends CustomPainter {
     }
 
     canvas.drawPath(path, paint);
+  }
+
+  /// 가변 굵기 스트로크 렌더링 (필압 기반 + 시작/끝 테이퍼)
+  void _drawVariableWidthStroke(Canvas canvas, Stroke stroke, Offset offset, bool highlight) {
+    final points = stroke.points;
+    if (points.length < 2) return;
+
+    final totalPoints = points.length;
+
+    // 하이라이트 그리기 (선택된 스트로크)
+    if (highlight) {
+      for (int i = 0; i < totalPoints - 1; i++) {
+        final p1 = points[i];
+        final p2 = points[i + 1];
+        final avgPressure = (p1.pressure + p2.pressure) / 2;
+        final width = stroke.getWidthAtPressure(avgPressure);
+
+        final glowPaint = Paint()
+          ..color = Colors.blue.withOpacity(0.3)
+          ..strokeCap = StrokeCap.round
+          ..strokeWidth = width + 6
+          ..style = PaintingStyle.stroke;
+
+        canvas.drawLine(
+          Offset(p1.x + offset.dx, p1.y + offset.dy),
+          Offset(p2.x + offset.dx, p2.y + offset.dy),
+          glowPaint,
+        );
+      }
+    }
+
+    // 시작/끝 테이퍼 효과를 위한 계수 계산
+    const taperLength = 5; // 테이퍼 적용 포인트 수
+
+    for (int i = 0; i < totalPoints - 1; i++) {
+      final p1 = points[i];
+      final p2 = points[i + 1];
+
+      // 기본 필압 기반 굵기
+      final avgPressure = (p1.pressure + p2.pressure) / 2;
+      double width = stroke.getWidthAtPressure(avgPressure);
+
+      // 시작 테이퍼 (처음 몇 포인트에서 얇게 시작)
+      if (i < taperLength) {
+        final taperRatio = (i + 1) / taperLength;
+        width *= 0.3 + (taperRatio * 0.7); // 30%에서 시작
+      }
+
+      // 끝 테이퍼 (마지막 몇 포인트에서 얇게 끝남)
+      if (i >= totalPoints - taperLength - 1) {
+        final distFromEnd = totalPoints - 1 - i;
+        final taperRatio = distFromEnd / taperLength;
+        width *= 0.3 + (taperRatio * 0.7); // 30%로 끝남
+      }
+
+      // 형광펜은 블렌드 모드 적용
+      final paint = Paint()
+        ..color = stroke.color
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = width
+        ..style = PaintingStyle.stroke;
+
+      if (stroke.toolType == ToolType.highlighter) {
+        paint.blendMode = BlendMode.multiply;
+      }
+
+      canvas.drawLine(
+        Offset(p1.x + offset.dx, p1.y + offset.dy),
+        Offset(p2.x + offset.dx, p2.y + offset.dy),
+        paint,
+      );
+    }
+
+    // 시작점과 끝점에 라운드 캡 추가
+    final startPoint = points.first;
+    final endPoint = points.last;
+
+    final startWidth = stroke.getWidthAtPressure(startPoint.pressure) * 0.3;
+    final endWidth = stroke.getWidthAtPressure(endPoint.pressure) * 0.3;
+
+    final capPaint = Paint()
+      ..color = stroke.color
+      ..style = PaintingStyle.fill;
+
+    if (stroke.toolType == ToolType.highlighter) {
+      capPaint.blendMode = BlendMode.multiply;
+    }
+
+    // 시작점 원형 캡
+    canvas.drawCircle(
+      Offset(startPoint.x + offset.dx, startPoint.y + offset.dy),
+      startWidth / 2,
+      capPaint,
+    );
+
+    // 끝점 원형 캡
+    canvas.drawCircle(
+      Offset(endPoint.x + offset.dx, endPoint.y + offset.dy),
+      endWidth / 2,
+      capPaint,
+    );
+  }
+
+  /// 스트로크가 지우개 범위 내에 있는지 확인
+  bool _isStrokeInEraserRange(Stroke stroke, Offset eraserPos, double radius) {
+    for (final point in stroke.points) {
+      final distance = (Offset(point.x, point.y) - eraserPos).distance;
+      if (distance <= radius + stroke.width / 2) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// 지우개로 지워질 스트로크 부분 하이라이트
+  void _drawEraserPreviewHighlight(Canvas canvas, Stroke stroke, Offset eraserPos, double radius) {
+    final highlightPaint = Paint()
+      ..color = Colors.red.withOpacity(0.4)
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke.width + 4;
+
+    // 지우개 범위 내의 포인트만 하이라이트
+    for (int i = 0; i < stroke.points.length - 1; i++) {
+      final p1 = stroke.points[i];
+      final p2 = stroke.points[i + 1];
+
+      final d1 = (Offset(p1.x, p1.y) - eraserPos).distance;
+      final d2 = (Offset(p2.x, p2.y) - eraserPos).distance;
+
+      // 두 점 중 하나라도 지우개 범위 내에 있으면 하이라이트
+      if (d1 <= radius + stroke.width / 2 || d2 <= radius + stroke.width / 2) {
+        canvas.drawLine(
+          Offset(p1.x, p1.y),
+          Offset(p2.x, p2.y),
+          highlightPaint,
+        );
+      }
+    }
   }
 
   @override
