@@ -1,5 +1,7 @@
-# CocoaPods CDN 소스 명시적 지정 (EAS Build 환경 대응)
+# CocoaPods 소스 명시적 지정 (EAS Build 환경 대응)
+# CDN 우선, GitHub Specs 백업
 source 'https://cdn.cocoapods.org/'
+source 'https://github.com/CocoaPods/Specs.git'
 
 # Uncomment this line to define a global platform for your project
 platform :ios, '12.0'

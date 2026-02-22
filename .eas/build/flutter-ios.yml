@@ -44,7 +44,7 @@ build:
         name: Install CocoaPods
         command: |
           set -x
-          sudo gem install cocoapods -v 1.15.2
+          sudo gem install cocoapods
           pod --version
 
     - run:

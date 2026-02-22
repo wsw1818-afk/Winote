@@ -1,1 +1,1 @@
-🔧 CocoaPods 저장소 명시 + 캐시 정리: DKCamera podspec 다운로드 문제 해결
+🔧 GitHub Specs 저장소 추가 + CocoaPods 최신 버전 사용: CDN 백업 경로 확보
