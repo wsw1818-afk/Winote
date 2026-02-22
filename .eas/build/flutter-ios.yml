@@ -52,8 +52,15 @@ build:
         name: Install CocoaPods
         command: |
           set -x
-          sudo gem install cocoapods
+          # Install CocoaPods and required dependencies
+          sudo gem install cocoapods cocoapods-downloader --no-document
           pod --version
+
+          # Verify cocoapods-downloader is installed
+          gem list | grep cocoapods-downloader || {
+            echo "ERROR: cocoapods-downloader not installed"
+            exit 1
+          }
 
     - run:
         name: Pod Install

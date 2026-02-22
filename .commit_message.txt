@@ -1,1 +1,1 @@
-🔍 EAS Build 디버깅 강화: podhelper.rb 검증 + Pod install 상세 에러 로그
+🔧 CocoaPods 의존성 수정: cocoapods-downloader gem 명시적 설치
