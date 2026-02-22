@@ -1,1 +1,1 @@
-🔧 GitHub Specs 저장소 추가 + CocoaPods 최신 버전 사용: CDN 백업 경로 확보
+🔧 CocoaPods 중복 저장소 제거: CDN만 사용하도록 수정

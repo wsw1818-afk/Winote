@@ -56,10 +56,16 @@ build:
 
           # CocoaPods 캐시 완전 정리
           pod cache clean --all || true
-          rm -rf ~/.cocoapods/repos/trunk || true
 
-          # CocoaPods 저장소 강제 업데이트
-          pod repo update --verbose
+          # 모든 저장소 제거 (중복 방지)
+          rm -rf ~/.cocoapods/repos/trunk || true
+          rm -rf ~/.cocoapods/repos/cocoapods || true
+
+          # CDN 저장소만 추가
+          pod repo add trunk https://cdn.cocoapods.org || true
+
+          # CocoaPods 저장소 업데이트
+          pod repo update trunk --verbose
 
           cd ios
           rm -rf Pods Podfile.lock .symlinks
