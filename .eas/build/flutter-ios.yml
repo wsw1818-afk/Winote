@@ -22,13 +22,21 @@ build:
           # Force download all iOS artifacts
           flutter precache --ios --force
 
-          # Verify podhelper exists after precache
-          ls -la $HOME/flutter/packages/flutter_tools/bin/podhelper.rb || {
-            echo "ERROR: podhelper.rb still missing after precache"
-            echo "Flutter directory structure:"
-            find $HOME/flutter/packages/flutter_tools/bin -type f | head -20
+          # Verify Flutter tools structure
+          echo "=== Flutter tools directory structure ==="
+          ls -la $HOME/flutter/packages/flutter_tools/bin/ || echo "bin directory not found"
+
+          # Verify podhelper.rb exists
+          if [ ! -f "$HOME/flutter/packages/flutter_tools/bin/podhelper.rb" ]; then
+            echo "ERROR: podhelper.rb not found after precache"
+            echo "Searching for podhelper files:"
+            find $HOME/flutter -name "*podhelper*" 2>/dev/null || echo "No podhelper files found"
+            echo "Flutter packages structure:"
+            ls -la $HOME/flutter/packages/ 2>/dev/null || echo "packages directory not found"
             exit 1
-          }
+          fi
+
+          echo "✅ podhelper.rb found successfully"
 
     - run:
         name: Flutter Doctor and Pub Get
@@ -55,11 +63,29 @@ build:
           export FLUTTER_ROOT="$HOME/flutter"
 
           cd ios
+
+          # Clean previous install
           rm -rf Pods Podfile.lock .symlinks
 
-          # Pod install (저장소 업데이트 없이)
-          pod install --verbose
+          # Verify FLUTTER_ROOT is accessible
+          echo "=== Flutter root verification ==="
+          echo "FLUTTER_ROOT=$FLUTTER_ROOT"
+          ls -la "$FLUTTER_ROOT/packages/flutter_tools/bin/podhelper.rb" || {
+            echo "ERROR: podhelper.rb not accessible from ios directory"
+            exit 1
+          }
 
+          # Pod install without repo update (faster, uses CDN cache)
+          echo "=== Starting Pod install ==="
+          pod install --verbose || {
+            echo "ERROR: Pod install failed"
+            echo "=== Pod environment ==="
+            pod --version
+            pod env
+            exit 1
+          }
+
+          echo "✅ Pod install completed successfully"
           cd ..
 
     - run:
