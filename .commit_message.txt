@@ -1,1 +1,1 @@
-🔧 Pod install --repo-update 사용: 자동 trunk 생성으로 간소화
+🔧 Pod install 타임아웃 방지: repo-update 및 캐시 정리 제거
