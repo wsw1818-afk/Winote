@@ -1,1 +1,1 @@
-🔍 Pod install 에러 캡처 강화: 실패 시 에러 라인 + 마지막 50줄 자동 출력
+🔧 CDN trunk 초기화 + repo-update 추가 + 에러 로그 파일 리다이렉트

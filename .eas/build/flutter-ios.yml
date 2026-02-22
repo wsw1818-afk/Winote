@@ -20,21 +20,18 @@ build:
           flutter config --no-analytics
           flutter precache --ios --force
 
-          # Verify podhelper.rb exists
           if [ ! -f "$HOME/flutter/packages/flutter_tools/bin/podhelper.rb" ]; then
             echo "ERROR: podhelper.rb not found"
-            find $HOME/flutter -name "*podhelper*" 2>/dev/null
             exit 1
           fi
           echo "✅ podhelper.rb found"
 
     - run:
-        name: Flutter Doctor and Pub Get
+        name: Flutter Pub Get
         command: |
           set -x
           export PATH="$HOME/flutter/bin:$HOME/flutter/bin/cache/dart-sdk/bin:$PATH"
 
-          flutter doctor -v || true
           flutter clean || true
           flutter pub get
 
@@ -43,31 +40,26 @@ build:
         command: |
           set -x
 
-          # Create completely isolated gem environment
           export GEM_HOME="$HOME/cocoapods_gems"
           export GEM_PATH="$HOME/cocoapods_gems"
           export PATH="$HOME/cocoapods_gems/bin:$PATH"
           mkdir -p "$GEM_HOME"
 
-          echo "=== Isolated gem environment ==="
-          echo "GEM_HOME=$GEM_HOME"
-          echo "GEM_PATH=$GEM_PATH"
-
-          # Fresh install CocoaPods in isolated environment
           gem install cocoapods --no-document
-
-          # Verify
-          echo "=== Installed gems ==="
-          gem list | grep cocoapods
           pod --version
-          echo "✅ CocoaPods installed in isolated environment"
+
+          # Initialize CDN trunk repo (required for fresh install)
+          echo "=== Initializing CocoaPods CDN trunk ==="
+          pod repo add-cdn trunk https://cdn.cocoapods.org/ 2>/dev/null || echo "trunk already exists or CDN mode"
+          pod repo list
+
+          echo "✅ CocoaPods ready"
 
     - run:
         name: Pod Install
         command: |
-          set -x
+          set +x
 
-          # Restore isolated gem environment
           export GEM_HOME="$HOME/cocoapods_gems"
           export GEM_PATH="$HOME/cocoapods_gems"
           export PATH="$HOME/cocoapods_gems/bin:$HOME/flutter/bin:$HOME/flutter/bin/cache/dart-sdk/bin:$PATH"
@@ -76,27 +68,26 @@ build:
           cd ios
           rm -rf Pods Podfile.lock .symlinks
 
-          echo "=== FLUTTER_ROOT=$FLUTTER_ROOT ==="
-          ls -la "$FLUTTER_ROOT/packages/flutter_tools/bin/podhelper.rb"
+          echo "=== Pod install with --repo-update ==="
 
-          # Pod install with full error capture
-          echo "=== Starting Pod install ==="
-          set +e
-          pod install --verbose 2>&1 | tee /tmp/pod_log.txt
-          POD_EXIT=$?
-          set -e
+          # Run pod install, capture ALL output to file (no tee/pipe issues)
+          pod install --repo-update --verbose > /tmp/pod_log.txt 2>&1 || POD_FAILED=true
 
-          if [ $POD_EXIT -ne 0 ]; then
+          # Always show last 80 lines (visible even on failure)
+          echo ""
+          echo "=========================================="
+          echo "=== POD INSTALL LOG (last 80 lines) ==="
+          echo "=========================================="
+          tail -80 /tmp/pod_log.txt
+
+          if [ "$POD_FAILED" = "true" ]; then
             echo ""
-            echo "========================================"
-            echo "=== POD INSTALL FAILED (exit $POD_EXIT) ==="
-            echo "========================================"
+            echo "=========================================="
+            echo "=== POD INSTALL FAILED ==="
+            echo "=========================================="
             echo ""
             echo "=== ERROR LINES ==="
-            grep -i "error\|fail\|unable\|invalid\|cannot\|not found\|could not" /tmp/pod_log.txt | head -30
-            echo ""
-            echo "=== LAST 50 LINES ==="
-            tail -50 /tmp/pod_log.txt
+            grep -i "error\|fail\|unable\|invalid\|cannot\|not found\|could not\|incompatible\|conflict" /tmp/pod_log.txt | head -30
             exit 1
           fi
 
