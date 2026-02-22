@@ -1,0 +1,46 @@
+workflows:
+  ios-workflow:
+    name: iOS Workflow
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+      vars:
+        # iOS 번들 ID (ios/Runner.xcodeproj에서 가져온 값 사용)
+        BUNDLE_ID: "com.winote.winote"
+
+    scripts:
+      - name: Get Flutter packages
+        script: |
+          flutter pub get
+
+      - name: Install CocoaPods dependencies
+        script: |
+          cd ios
+          pod install
+
+      - name: Build iOS (no codesign)
+        script: |
+          flutter build ios --release --no-codesign
+
+      - name: List build output
+        script: |
+          ls -la build/ios/iphoneos/
+          find build/ios/iphoneos -name "*.app"
+
+    artifacts:
+      - build/ios/iphoneos/**/*.app
+      - build/ios/iphoneos/**/*.dSYM
+
+    publishing:
+      email:
+        recipients:
+          # 빌드 결과를 받을 이메일 (필요시 수정)
+          - wisangwon1@gmail.com
+        notify:
+          success: true
+          failure: true

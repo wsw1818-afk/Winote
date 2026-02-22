@@ -1,1 +1,1 @@
-🔧 iOS 최소 배포 타겟 12.0 → 15.0: speech_to_text 호환성 해결
+✨ Codemagic CI/CD 설정 추가: Flutter 전용 iOS 빌드 환경
