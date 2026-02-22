@@ -11,6 +11,10 @@ project 'Runner', {
 }
 
 def flutter_root
+  # EAS Build 환경 대응: 환경 변수 우선 사용
+  return ENV['FLUTTER_ROOT'] if ENV['FLUTTER_ROOT']
+  return File.expand_path('~/flutter') if File.exist?(File.expand_path('~/flutter/bin/flutter'))
+
   generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
   unless File.exist?(generated_xcode_build_settings_path)
     raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
