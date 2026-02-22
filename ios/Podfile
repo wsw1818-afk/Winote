@@ -1,3 +1,6 @@
+# CocoaPods CDN 소스 명시적 지정 (EAS Build 환경 대응)
+source 'https://cdn.cocoapods.org/'
+
 # Uncomment this line to define a global platform for your project
 platform :ios, '12.0'
 
@@ -27,7 +30,7 @@ def flutter_root
   raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
 end
 
-require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper.rb'), flutter_root)
 
 flutter_ios_podfile_setup
 
