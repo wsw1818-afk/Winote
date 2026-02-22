@@ -39,52 +39,48 @@ build:
           flutter pub get
 
     - run:
-        name: Setup CocoaPods via Bundler and Pod Install
+        name: Install CocoaPods (Isolated Gem Environment)
         command: |
           set -x
-          export PATH="$HOME/flutter/bin:$HOME/flutter/bin/cache/dart-sdk/bin:$PATH"
+
+          # Create completely isolated gem environment
+          export GEM_HOME="$HOME/cocoapods_gems"
+          export GEM_PATH="$HOME/cocoapods_gems"
+          export PATH="$HOME/cocoapods_gems/bin:$PATH"
+          mkdir -p "$GEM_HOME"
+
+          echo "=== Isolated gem environment ==="
+          echo "GEM_HOME=$GEM_HOME"
+          echo "GEM_PATH=$GEM_PATH"
+
+          # Fresh install CocoaPods in isolated environment
+          gem install cocoapods --no-document
+
+          # Verify
+          echo "=== Installed gems ==="
+          gem list | grep cocoapods
+          pod --version
+          echo "✅ CocoaPods installed in isolated environment"
+
+    - run:
+        name: Pod Install
+        command: |
+          set -x
+
+          # Restore isolated gem environment
+          export GEM_HOME="$HOME/cocoapods_gems"
+          export GEM_PATH="$HOME/cocoapods_gems"
+          export PATH="$HOME/cocoapods_gems/bin:$HOME/flutter/bin:$HOME/flutter/bin/cache/dart-sdk/bin:$PATH"
           export FLUTTER_ROOT="$HOME/flutter"
 
           cd ios
-
-          # Clean previous install
           rm -rf Pods Podfile.lock .symlinks
 
-          # Remove any existing broken CocoaPods
-          echo "=== Cleaning existing CocoaPods ==="
-          sudo gem uninstall cocoapods --all --executables --force 2>/dev/null || true
-          sudo gem uninstall cocoapods-core --all --force 2>/dev/null || true
-          sudo gem uninstall cocoapods-downloader --all --force 2>/dev/null || true
-          sudo gem uninstall cocoapods-plugins --all --force 2>/dev/null || true
-          sudo gem uninstall cocoapods-search --all --force 2>/dev/null || true
-          sudo gem uninstall cocoapods-trunk --all --force 2>/dev/null || true
-          sudo gem uninstall cocoapods-try --all --force 2>/dev/null || true
-          sudo gem uninstall cocoapods-deintegrate --all --force 2>/dev/null || true
-
-          # Create Gemfile for clean CocoaPods install
-          echo "=== Creating Gemfile ==="
-          cat > Gemfile << 'GEMEOF'
-          source 'https://rubygems.org'
-          gem 'cocoapods', '~> 1.16'
-          GEMEOF
-
-          # Install Bundler and CocoaPods via Bundler
-          echo "=== Installing via Bundler ==="
-          gem install bundler --no-document
-          bundle install
-
-          # Verify installation
-          echo "=== Verifying CocoaPods ==="
-          bundle exec pod --version
-          bundle exec gem list | grep cocoapods
-
-          # Verify FLUTTER_ROOT
           echo "=== FLUTTER_ROOT=$FLUTTER_ROOT ==="
           ls -la "$FLUTTER_ROOT/packages/flutter_tools/bin/podhelper.rb"
 
-          # Pod install via Bundler
           echo "=== Starting Pod install ==="
-          bundle exec pod install --verbose
+          pod install --verbose
 
           echo "✅ Pod install completed successfully"
           cd ..

@@ -1,1 +1,1 @@
-🔧 CocoaPods Bundler 기반 재설치: 기존 깨진 gem 제거 후 깨끗하게 설치
+🔧 CocoaPods 격리 gem 환경: GEM_HOME 분리로 기존 깨진 gem 우회
