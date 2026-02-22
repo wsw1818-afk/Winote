@@ -1,1 +1,1 @@
-✨ Codemagic CI/CD 설정 추가: Flutter 전용 iOS 빌드 환경
+🔧 Android SDK 36 + assets 폴더 생성 + Codemagic iOS 전용 빌드
