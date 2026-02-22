@@ -44,8 +44,64 @@ workflows:
     publishing:
       email:
         recipients:
-          # 빌드 결과를 받을 이메일 (필요시 수정)
           - wisangwon1@gmail.com
         notify:
           success: true
           failure: true
+
+  # TestFlight 자동 배포 워크플로우 (Apple Developer 계정 필요)
+  ios-testflight:
+    name: iOS TestFlight
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+      vars:
+        BUNDLE_ID: "com.winote.winote"
+        # Codemagic 웹에서 설정할 환경 변수:
+        # APP_STORE_CONNECT_ISSUER_ID
+        # APP_STORE_CONNECT_KEY_IDENTIFIER
+        # APP_STORE_CONNECT_PRIVATE_KEY
+
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.winote.winote
+
+    scripts:
+      - name: Create missing asset directories
+        script: |
+          mkdir -p assets/templates
+          mkdir -p assets/icons
+
+      - name: Get Flutter packages
+        script: |
+          flutter pub get
+
+      - name: Install CocoaPods dependencies
+        script: |
+          cd ios
+          pod install
+
+      - name: Build iOS for App Store
+        script: |
+          flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+
+    publishing:
+      email:
+        recipients:
+          - wisangwon1@gmail.com
+        notify:
+          success: true
+          failure: true
+
+      app_store_connect:
+        # TestFlight에 자동 업로드
+        auth: integration
+        submit_to_testflight: true

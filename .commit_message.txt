@@ -1,1 +1,1 @@
-🔧 Android SDK 36 + assets 폴더 생성 + Codemagic iOS 전용 빌드
+✨ Codemagic TestFlight 워크플로우 추가: iPad 실기기 테스트 준비
