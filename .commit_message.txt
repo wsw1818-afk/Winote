@@ -1,1 +1,1 @@
-🔧 CocoaPods 중복 저장소 제거: CDN만 사용하도록 수정
+🔧 Pod install --repo-update 사용: 자동 trunk 생성으로 간소화

@@ -54,24 +54,15 @@ build:
           export PATH="$HOME/flutter/bin:$HOME/flutter/bin/cache/dart-sdk/bin:$PATH"
           export FLUTTER_ROOT="$HOME/flutter"
 
-          # CocoaPods 캐시 완전 정리
+          # CocoaPods 캐시 및 저장소 완전 정리
           pod cache clean --all || true
-
-          # 모든 저장소 제거 (중복 방지)
-          rm -rf ~/.cocoapods/repos/trunk || true
-          rm -rf ~/.cocoapods/repos/cocoapods || true
-
-          # CDN 저장소만 추가
-          pod repo add trunk https://cdn.cocoapods.org || true
-
-          # CocoaPods 저장소 업데이트
-          pod repo update trunk --verbose
+          rm -rf ~/.cocoapods/repos
 
           cd ios
           rm -rf Pods Podfile.lock .symlinks
 
-          # Pod install 실행
-          pod install --verbose
+          # Pod install with repo update (자동으로 trunk 생성)
+          pod install --repo-update --verbose
 
           cd ..
 
