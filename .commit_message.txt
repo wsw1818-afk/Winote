@@ -1,1 +1,1 @@
-🔧 CocoaPods 격리 gem 환경: GEM_HOME 분리로 기존 깨진 gem 우회
+🔍 Pod install 에러 캡처 강화: 실패 시 에러 라인 + 마지막 50줄 자동 출력

@@ -79,8 +79,26 @@ build:
           echo "=== FLUTTER_ROOT=$FLUTTER_ROOT ==="
           ls -la "$FLUTTER_ROOT/packages/flutter_tools/bin/podhelper.rb"
 
+          # Pod install with full error capture
           echo "=== Starting Pod install ==="
-          pod install --verbose
+          set +e
+          pod install --verbose 2>&1 | tee /tmp/pod_log.txt
+          POD_EXIT=$?
+          set -e
+
+          if [ $POD_EXIT -ne 0 ]; then
+            echo ""
+            echo "========================================"
+            echo "=== POD INSTALL FAILED (exit $POD_EXIT) ==="
+            echo "========================================"
+            echo ""
+            echo "=== ERROR LINES ==="
+            grep -i "error\|fail\|unable\|invalid\|cannot\|not found\|could not" /tmp/pod_log.txt | head -30
+            echo ""
+            echo "=== LAST 50 LINES ==="
+            tail -50 /tmp/pod_log.txt
+            exit 1
+          fi
 
           echo "✅ Pod install completed successfully"
           cd ..
