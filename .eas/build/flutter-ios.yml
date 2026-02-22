@@ -18,25 +18,15 @@ build:
           export PATH="$HOME/flutter/bin:$HOME/flutter/bin/cache/dart-sdk/bin:$PATH"
 
           flutter config --no-analytics
-
-          # Force download all iOS artifacts
           flutter precache --ios --force
-
-          # Verify Flutter tools structure
-          echo "=== Flutter tools directory structure ==="
-          ls -la $HOME/flutter/packages/flutter_tools/bin/ || echo "bin directory not found"
 
           # Verify podhelper.rb exists
           if [ ! -f "$HOME/flutter/packages/flutter_tools/bin/podhelper.rb" ]; then
-            echo "ERROR: podhelper.rb not found after precache"
-            echo "Searching for podhelper files:"
-            find $HOME/flutter -name "*podhelper*" 2>/dev/null || echo "No podhelper files found"
-            echo "Flutter packages structure:"
-            ls -la $HOME/flutter/packages/ 2>/dev/null || echo "packages directory not found"
+            echo "ERROR: podhelper.rb not found"
+            find $HOME/flutter -name "*podhelper*" 2>/dev/null
             exit 1
           fi
-
-          echo "✅ podhelper.rb found successfully"
+          echo "✅ podhelper.rb found"
 
     - run:
         name: Flutter Doctor and Pub Get
@@ -49,21 +39,7 @@ build:
           flutter pub get
 
     - run:
-        name: Install CocoaPods
-        command: |
-          set -x
-          # Install CocoaPods and required dependencies
-          sudo gem install cocoapods cocoapods-downloader --no-document
-          pod --version
-
-          # Verify cocoapods-downloader is installed
-          gem list | grep cocoapods-downloader || {
-            echo "ERROR: cocoapods-downloader not installed"
-            exit 1
-          }
-
-    - run:
-        name: Pod Install
+        name: Setup CocoaPods via Bundler and Pod Install
         command: |
           set -x
           export PATH="$HOME/flutter/bin:$HOME/flutter/bin/cache/dart-sdk/bin:$PATH"
@@ -74,23 +50,41 @@ build:
           # Clean previous install
           rm -rf Pods Podfile.lock .symlinks
 
-          # Verify FLUTTER_ROOT is accessible
-          echo "=== Flutter root verification ==="
-          echo "FLUTTER_ROOT=$FLUTTER_ROOT"
-          ls -la "$FLUTTER_ROOT/packages/flutter_tools/bin/podhelper.rb" || {
-            echo "ERROR: podhelper.rb not accessible from ios directory"
-            exit 1
-          }
+          # Remove any existing broken CocoaPods
+          echo "=== Cleaning existing CocoaPods ==="
+          sudo gem uninstall cocoapods --all --executables --force 2>/dev/null || true
+          sudo gem uninstall cocoapods-core --all --force 2>/dev/null || true
+          sudo gem uninstall cocoapods-downloader --all --force 2>/dev/null || true
+          sudo gem uninstall cocoapods-plugins --all --force 2>/dev/null || true
+          sudo gem uninstall cocoapods-search --all --force 2>/dev/null || true
+          sudo gem uninstall cocoapods-trunk --all --force 2>/dev/null || true
+          sudo gem uninstall cocoapods-try --all --force 2>/dev/null || true
+          sudo gem uninstall cocoapods-deintegrate --all --force 2>/dev/null || true
 
-          # Pod install without repo update (faster, uses CDN cache)
+          # Create Gemfile for clean CocoaPods install
+          echo "=== Creating Gemfile ==="
+          cat > Gemfile << 'GEMEOF'
+          source 'https://rubygems.org'
+          gem 'cocoapods', '~> 1.16'
+          GEMEOF
+
+          # Install Bundler and CocoaPods via Bundler
+          echo "=== Installing via Bundler ==="
+          gem install bundler --no-document
+          bundle install
+
+          # Verify installation
+          echo "=== Verifying CocoaPods ==="
+          bundle exec pod --version
+          bundle exec gem list | grep cocoapods
+
+          # Verify FLUTTER_ROOT
+          echo "=== FLUTTER_ROOT=$FLUTTER_ROOT ==="
+          ls -la "$FLUTTER_ROOT/packages/flutter_tools/bin/podhelper.rb"
+
+          # Pod install via Bundler
           echo "=== Starting Pod install ==="
-          pod install --verbose || {
-            echo "ERROR: Pod install failed"
-            echo "=== Pod environment ==="
-            pod --version
-            pod env
-            exit 1
-          }
+          bundle exec pod install --verbose
 
           echo "✅ Pod install completed successfully"
           cd ..

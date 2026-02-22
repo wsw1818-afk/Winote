@@ -1,1 +1,1 @@
-🔧 CocoaPods 의존성 수정: cocoapods-downloader gem 명시적 설치
+🔧 CocoaPods Bundler 기반 재설치: 기존 깨진 gem 제거 후 깨끗하게 설치
