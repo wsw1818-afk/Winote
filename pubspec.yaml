@@ -60,6 +60,10 @@ dependencies:
   # Windows API (FFI)
   win32: ^5.0.0
   ffi: ^2.1.0
+  opencv_dart: ^1.4.3
+
+  # 딥러닝 문서 감지 (DocAligner ONNX)
+  onnxruntime: ^1.4.1
 
 dev_dependencies:
   flutter_test:
@@ -77,3 +81,4 @@ flutter:
   assets:
     - assets/templates/
     - assets/icons/
+    - assets/models/

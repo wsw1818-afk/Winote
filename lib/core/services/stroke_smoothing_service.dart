@@ -14,6 +14,9 @@ enum SmoothingLevel {
 /// - 베지어 커브 피팅
 /// - 필압 감도 보정
 /// - 떨림 제거 (Jitter removal)
+/// - 펜 예측 알고리즘 (지연 감소)
+/// - 입필/출필 자연스러운 처리
+/// - 빠른 필기 시 포인트 보간
 class StrokeSmoothingService {
   static final StrokeSmoothingService instance = StrokeSmoothingService._();
   StrokeSmoothingService._();
@@ -23,9 +26,18 @@ class StrokeSmoothingService {
   SmoothingLevel get level => _level;
   set level(SmoothingLevel value) => _level = value;
 
+  /// 펜 예측 활성화 여부
+  bool _predictionEnabled = true;
+  bool get predictionEnabled => _predictionEnabled;
+  set predictionEnabled(bool value) => _predictionEnabled = value;
+
   /// 속도 추적을 위한 버퍼
   final List<_VelocityPoint> _velocityBuffer = [];
   static const int _velocityBufferSize = 5;
+
+  /// 예측을 위한 최근 포인트 버퍼
+  final List<StrokePoint> _predictionBuffer = [];
+  static const int _predictionBufferSize = 4;
 
   /// 보정 강도별 파라미터
   Map<SmoothingLevel, _SmoothingParams> get _params => {
@@ -66,6 +78,7 @@ class StrokeSmoothingService {
   /// 스트로크 시작 시 버퍼 초기화
   void beginStroke() {
     _velocityBuffer.clear();
+    _predictionBuffer.clear();
   }
 
   /// 실시간 포인트 필터링 (입력 시점에 적용)
@@ -210,6 +223,189 @@ class StrokeSmoothingService {
 
     // 감도에 따라 원본과 평균 사이 보간
     return newPressure * sensitivity + avgPressure * (1 - sensitivity);
+  }
+
+  // ==================== 펜 예측 알고리즘 ====================
+
+  /// 다음 포인트 예측 (지연 감소용)
+  /// 최근 포인트들의 속도와 가속도를 분석하여 다음 위치 예측
+  StrokePoint? predictNextPoint(StrokePoint currentPoint, List<StrokePoint> existingPoints) {
+    if (!_predictionEnabled || _level == SmoothingLevel.none) return null;
+    if (existingPoints.length < 3) return null;
+
+    // 예측 버퍼 업데이트
+    _predictionBuffer.add(currentPoint);
+    if (_predictionBuffer.length > _predictionBufferSize) {
+      _predictionBuffer.removeAt(0);
+    }
+
+    if (_predictionBuffer.length < 3) return null;
+
+    // 최근 3개 포인트로 속도/가속도 계산
+    final p0 = _predictionBuffer[_predictionBuffer.length - 3];
+    final p1 = _predictionBuffer[_predictionBuffer.length - 2];
+    final p2 = _predictionBuffer[_predictionBuffer.length - 1];
+
+    // 속도 벡터 계산
+    final dt1 = (p1.timestamp - p0.timestamp).toDouble();
+    final dt2 = (p2.timestamp - p1.timestamp).toDouble();
+
+    // Division by zero 방지: 최소 1ms 이상 필요
+    if (dt1 < 1 || dt2 < 1) return null;
+
+    final vx1 = (p1.x - p0.x) / dt1;
+    final vy1 = (p1.y - p0.y) / dt1;
+    final vx2 = (p2.x - p1.x) / dt2;
+    final vy2 = (p2.y - p1.y) / dt2;
+
+    // 가속도 계산 (dt 합이 0이 될 수 없음 - 위에서 최소 1ms 보장)
+    final avgDt = (dt1 + dt2) / 2;
+    final ax = (vx2 - vx1) / avgDt;
+    final ay = (vy2 - vy1) / avgDt;
+
+    // 예측 시간 (속도에 따라 조절 - 빠를수록 더 앞을 예측)
+    final velocity = math.sqrt(vx2 * vx2 + vy2 * vy2);
+    final predictionTime = (velocity * 0.02).clamp(5.0, 20.0); // 5~20ms 앞 예측
+
+    // 2차 운동 방정식으로 위치 예측: x = x0 + v*t + 0.5*a*t^2
+    final predictedX = p2.x + vx2 * predictionTime + 0.5 * ax * predictionTime * predictionTime;
+    final predictedY = p2.y + vy2 * predictionTime + 0.5 * ay * predictionTime * predictionTime;
+
+    // 예측 거리 제한 (너무 멀리 예측하지 않음)
+    const maxPredictionDist = 15.0; // 최대 15px
+    final dx = predictedX - p2.x;
+    final dy = predictedY - p2.y;
+    final dist = math.sqrt(dx * dx + dy * dy);
+
+    double finalX = predictedX;
+    double finalY = predictedY;
+
+    if (dist > maxPredictionDist) {
+      final scale = maxPredictionDist / dist;
+      finalX = p2.x + dx * scale;
+      finalY = p2.y + dy * scale;
+    }
+
+    return StrokePoint(
+      x: finalX,
+      y: finalY,
+      pressure: p2.pressure, // 필압은 현재값 유지
+      tilt: p2.tilt,
+      timestamp: p2.timestamp + predictionTime.round(),
+    );
+  }
+
+  // ==================== 빠른 필기 시 포인트 보간 ====================
+
+  /// 두 포인트 사이에 보간 포인트 생성 (빠른 필기 시 끊김 방지)
+  List<StrokePoint> interpolatePoints(StrokePoint p1, StrokePoint p2, {double maxGap = 8.0}) {
+    final dx = p2.x - p1.x;
+    final dy = p2.y - p1.y;
+    final distance = math.sqrt(dx * dx + dy * dy);
+
+    // 거리가 maxGap 이하면 보간 불필요
+    if (distance <= maxGap) {
+      return [p2];
+    }
+
+    // 필요한 보간 포인트 수 계산
+    final numPoints = (distance / maxGap).ceil();
+    final result = <StrokePoint>[];
+
+    for (int i = 1; i <= numPoints; i++) {
+      final t = i / numPoints;
+
+      // Hermite 보간으로 더 자연스러운 곡선 (속도 기반)
+      final x = p1.x + dx * t;
+      final y = p1.y + dy * t;
+
+      // 필압은 선형 보간
+      final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
+
+      // 타임스탬프 보간
+      final timestamp = p1.timestamp + ((p2.timestamp - p1.timestamp) * t).round();
+
+      result.add(StrokePoint(
+        x: x,
+        y: y,
+        pressure: pressure,
+        tilt: p1.tilt + (p2.tilt - p1.tilt) * t,
+        timestamp: timestamp,
+      ),);
+    }
+
+    return result;
+  }
+
+  // ==================== 입필/출필 처리 ====================
+
+  /// 스트로크 시작부 자연스러운 처리 (입필 효과)
+  /// 처음 몇 포인트의 필압을 점진적으로 증가
+  List<StrokePoint> applyEntryTaper(List<StrokePoint> points, {int taperLength = 5}) {
+    if (points.length <= taperLength) return points;
+
+    final result = <StrokePoint>[];
+    for (int i = 0; i < points.length; i++) {
+      final p = points[i];
+      double pressure = p.pressure;
+
+      if (i < taperLength) {
+        // 부드러운 이징 곡선 (ease-in)
+        final t = (i + 1) / taperLength;
+        final easedT = t * t * (3 - 2 * t); // smoothstep
+        pressure = p.pressure * (0.2 + easedT * 0.8); // 20%에서 시작
+      }
+
+      result.add(StrokePoint(
+        x: p.x,
+        y: p.y,
+        pressure: pressure,
+        tilt: p.tilt,
+        timestamp: p.timestamp,
+      ),);
+    }
+    return result;
+  }
+
+  /// 스트로크 끝부분 자연스러운 처리 (출필 효과)
+  /// 마지막 몇 포인트의 필압을 점진적으로 감소
+  List<StrokePoint> applyExitTaper(List<StrokePoint> points, {int taperLength = 5}) {
+    if (points.length <= taperLength) return points;
+
+    final result = List<StrokePoint>.from(points);
+    final startIdx = points.length - taperLength;
+
+    for (int i = startIdx; i < points.length; i++) {
+      final p = points[i];
+      final distFromEnd = points.length - 1 - i;
+
+      // 부드러운 이징 곡선 (ease-out)
+      final t = (distFromEnd + 1) / taperLength;
+      final easedT = t * t * (3 - 2 * t); // smoothstep
+      final pressure = p.pressure * (0.1 + easedT * 0.9); // 10%로 끝남
+
+      result[i] = StrokePoint(
+        x: p.x,
+        y: p.y,
+        pressure: pressure,
+        tilt: p.tilt,
+        timestamp: p.timestamp,
+      );
+    }
+    return result;
+  }
+
+  /// 완성된 스트로크에 입필/출필 모두 적용
+  List<StrokePoint> applyNaturalTaper(List<StrokePoint> points) {
+    if (points.length < 6) return points;
+
+    // 스트로크 길이에 따라 테이퍼 길이 조절
+    final taperLength = math.min(5, points.length ~/ 4);
+    if (taperLength < 2) return points;
+
+    var result = applyEntryTaper(points, taperLength: taperLength);
+    result = applyExitTaper(result, taperLength: taperLength);
+    return result;
   }
 
   /// 완성된 스트로크 후처리
@@ -425,7 +621,7 @@ class StrokeSmoothingService {
         pressure: sumPressure / totalWeight,
         tilt: points[i].tilt,
         timestamp: points[i].timestamp,
-      ));
+      ),);
     }
 
     return result;
@@ -447,7 +643,9 @@ class StrokeSmoothingService {
     final mag1 = math.sqrt(v1x * v1x + v1y * v1y);
     final mag2 = math.sqrt(v2x * v2x + v2y * v2y);
 
-    if (mag1 == 0 || mag2 == 0) return 180;
+    // 부동소수점 안전 비교: 매우 작은 값은 0으로 간주
+    const epsilon = 1e-10;
+    if (mag1 < epsilon || mag2 < epsilon) return 180;
 
     final cosAngle = (dot / (mag1 * mag2)).clamp(-1.0, 1.0);
     return math.acos(cosAngle) * 180 / math.pi;
@@ -484,13 +682,31 @@ class StrokeSmoothingService {
     final startEnd = _distance(points.first, points.last);
     if (startEnd < 30) return false;
 
+    // 스트로크 전체 길이 계산
+    double totalLength = 0;
+    for (int i = 1; i < points.length; i++) {
+      totalLength += _distance(points[i - 1], points[i]);
+    }
+
+    // 직선에서의 편차 계산
     double totalDeviation = 0;
+    double maxDeviation = 0;
     for (final point in points) {
-      totalDeviation += _perpendicularDistance(point, points.first, points.last);
+      final deviation = _perpendicularDistance(point, points.first, points.last);
+      totalDeviation += deviation;
+      if (deviation > maxDeviation) maxDeviation = deviation;
     }
     final avgDeviation = totalDeviation / points.length;
 
-    return avgDeviation < startEnd * 0.05;
+    // 직선 인식 조건 완화:
+    // 1. 평균 편차가 시작-끝 거리의 12% 이하
+    // 2. 최대 편차가 시작-끝 거리의 20% 이하
+    // 3. 전체 경로 길이가 시작-끝 거리의 1.3배 이하 (너무 구불구불하지 않음)
+    final avgDeviationOk = avgDeviation < startEnd * 0.12;
+    final maxDeviationOk = maxDeviation < startEnd * 0.20;
+    final pathLengthOk = totalLength < startEnd * 1.3;
+
+    return avgDeviationOk && maxDeviationOk && pathLengthOk;
   }
 
   /// 직선으로 교정
@@ -514,7 +730,7 @@ class StrokeSmoothingService {
 
   /// 닫힌 도형 여부
   bool _isLikelyClosed(List<StrokePoint> points) {
-    if (points.length < 10) return false;
+    if (points.length < 8) return false;  // 최소 포인트 수 완화
 
     final start = points.first;
     final end = points.last;
@@ -525,12 +741,14 @@ class StrokeSmoothingService {
       totalLength += _distance(points[i - 1], points[i]);
     }
 
-    return distance < totalLength * 0.15;
+    // 닫힘 판정 완화: 15% -> 25%
+    // 시작점과 끝점 사이 거리가 전체 경로 길이의 25% 이하면 닫힌 도형으로 판정
+    return distance < totalLength * 0.25;
   }
 
   /// 원 여부 판정
   bool _isLikelyCircle(List<StrokePoint> points) {
-    if (points.length < 10) return false;
+    if (points.length < 8) return false;  // 최소 포인트 수 완화
 
     double minX = double.infinity, maxX = double.negativeInfinity;
     double minY = double.infinity, maxY = double.negativeInfinity;
@@ -546,7 +764,13 @@ class StrokeSmoothingService {
     final centerY = (minY + maxY) / 2;
     final avgRadius = ((maxX - minX) + (maxY - minY)) / 4;
 
-    if (avgRadius < 20) return false;
+    if (avgRadius < 15) return false;  // 최소 반지름 완화
+
+    // 가로/세로 비율 체크 (타원도 허용)
+    final width = maxX - minX;
+    final height = maxY - minY;
+    final aspectRatio = math.min(width, height) / math.max(width, height);
+    if (aspectRatio < 0.5) return false;  // 너무 찌그러진 도형 제외
 
     double sumSquaredDiff = 0;
     for (final p in points) {
@@ -556,7 +780,8 @@ class StrokeSmoothingService {
     final variance = sumSquaredDiff / points.length;
     final stdDev = math.sqrt(variance);
 
-    return stdDev < avgRadius * 0.15;
+    // 원 인식 임계값 완화: 15% -> 25%
+    return stdDev < avgRadius * 0.25;
   }
 
   /// 타원으로 교정
@@ -589,7 +814,7 @@ class StrokeSmoothingService {
         pressure: avgPressure,
         tilt: 0,
         timestamp: points.first.timestamp + i,
-      ));
+      ),);
     }
 
     return result;

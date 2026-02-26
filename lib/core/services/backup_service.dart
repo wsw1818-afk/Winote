@@ -201,7 +201,7 @@ class BackupService {
             createdAt: backupDate ?? stat.modified,
             noteCount: noteCount,
             folderCount: folderCount,
-          ));
+          ),);
         } catch (e) {
           debugPrint('[BackupService] Error reading backup info: $e');
         }

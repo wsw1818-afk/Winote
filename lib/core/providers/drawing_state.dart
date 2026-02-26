@@ -41,7 +41,7 @@ class DrawingState extends ChangeNotifier {
   double get penWidth => _penWidth;
 
   // Highlighter settings
-  Color _highlighterColor = Colors.yellow.withOpacity(0.5);
+  Color _highlighterColor = Colors.yellow.withValues(alpha: 0.5 );
   double _highlighterWidth = 20.0;
   Color get highlighterColor => _highlighterColor;
   double get highlighterWidth => _highlighterWidth;
@@ -64,6 +64,10 @@ class DrawingState extends ChangeNotifier {
   final List<_UndoAction> _undoStack = [];
   final List<_UndoAction> _redoStack = [];
   static const int _maxHistorySize = 50;
+
+  // 시간 기반 undo 그룹핑 (연속된 빠른 필기를 하나로 묶음)
+  DateTime? _lastActionTime;
+  static const Duration _groupingThreshold = Duration(milliseconds: 500);
 
   List<Stroke> get strokes => _strokes;
   bool get canUndo => _undoStack.isNotEmpty;
@@ -132,7 +136,7 @@ class DrawingState extends ChangeNotifier {
 
   /// Set highlighter color
   void setHighlighterColor(Color color) {
-    _highlighterColor = color.withOpacity(0.5);
+    _highlighterColor = color.withValues(alpha: 0.5 );
     notifyListeners();
   }
 
@@ -232,7 +236,7 @@ class DrawingState extends ChangeNotifier {
 
     final action = _redoStack.removeLast();
     _undoStack.add(action.createInverse(_strokes));
-    action.undo(_strokes);
+    action.redo(_strokes);  // undo가 아닌 redo 호출
     notifyListeners();
   }
 
@@ -244,13 +248,39 @@ class DrawingState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Push undo action with size limit
-  void _pushUndo(_UndoAction action) {
-    _undoStack.add(action);
-    if (_undoStack.length > _maxHistorySize) {
-      _undoStack.removeAt(0);
+  /// Push undo action with size limit and time-based grouping
+  void _pushUndo(_UndoAction action, {bool forceNewGroup = false}) {
+    final now = DateTime.now();
+
+    // 시간 기반 그룹핑: 이전 액션과 500ms 이내이고, 같은 타입이면 그룹화
+    if (!forceNewGroup &&
+        _lastActionTime != null &&
+        _undoStack.isNotEmpty &&
+        now.difference(_lastActionTime!) <= _groupingThreshold &&
+        action.type == _UndoActionType.add &&
+        _undoStack.last.type == _UndoActionType.add) {
+      // 기존 add 액션과 합치기 (그룹 확장)
+      final lastAction = _undoStack.removeLast();
+      final groupedAction = _UndoAction.addGroup([
+        ...lastAction.addedStrokes ?? [lastAction.addedStroke!],
+        action.addedStroke!,
+      ]);
+      _undoStack.add(groupedAction);
+    } else {
+      // 새로운 액션 추가
+      _undoStack.add(action);
+      if (_undoStack.length > _maxHistorySize) {
+        _undoStack.removeAt(0);
+      }
     }
+
+    _lastActionTime = now;
     _redoStack.clear();
+  }
+
+  /// 시간 기반 그룹핑 초기화 (펜을 떼면 호출)
+  void resetUndoGrouping() {
+    _lastActionTime = null;
   }
 
   /// Erase strokes at a point (partial erasing - splits strokes)
@@ -350,9 +380,9 @@ class DrawingState extends ChangeNotifier {
 
 /// Undo 액션 타입
 enum _UndoActionType {
-  add,     // 스트로크 추가
-  erase,   // 스트로크 지우기 (분할 포함)
-  replace, // 전체 교체 (스냅샷)
+  add,      // 스트로크 추가 (단일 또는 그룹)
+  erase,    // 스트로크 지우기 (분할 포함)
+  replace,  // 전체 교체 (스냅샷)
 }
 
 /// 델타 기반 Undo 액션 (메모리 최적화)
@@ -371,9 +401,17 @@ class _UndoAction {
     this.snapshot,
   });
 
-  /// 스트로크 추가 액션
+  /// 스트로크 추가 액션 (단일)
   factory _UndoAction.add(Stroke stroke) {
     return _UndoAction._(type: _UndoActionType.add, addedStroke: stroke);
+  }
+
+  /// 스트로크 그룹 추가 액션 (시간 기반 그룹핑용)
+  factory _UndoAction.addGroup(List<Stroke> strokes) {
+    return _UndoAction._(
+      type: _UndoActionType.add,
+      addedStrokes: List.from(strokes),
+    );
   }
 
   /// 스트로크 지우기 액션 (분할 포함)
@@ -394,15 +432,26 @@ class _UndoAction {
   void undo(List<Stroke> strokes) {
     switch (type) {
       case _UndoActionType.add:
-        // 추가된 스트로크 제거
-        strokes.removeWhere((s) => s.id == addedStroke!.id);
+        // 추가된 스트로크 제거 (단일 또는 그룹)
+        if (addedStrokes != null && addedStrokes!.isNotEmpty) {
+          // 그룹 액션: 여러 스트로크 제거
+          final idsToRemove = addedStrokes!.map((s) => s.id).toSet();
+          strokes.removeWhere((s) => idsToRemove.contains(s.id));
+        } else if (addedStroke != null) {
+          // 단일 액션
+          strokes.removeWhere((s) => s.id == addedStroke!.id);
+        }
         break;
       case _UndoActionType.erase:
         // 분할된 스트로크 제거하고 원본 복원
-        for (final added in addedStrokes!) {
-          strokes.removeWhere((s) => s.id == added.id);
+        if (addedStrokes != null) {
+          for (final added in addedStrokes!) {
+            strokes.removeWhere((s) => s.id == added.id);
+          }
         }
-        strokes.addAll(removedStrokes!);
+        if (removedStrokes != null) {
+          strokes.addAll(removedStrokes!);
+        }
         break;
       case _UndoActionType.replace:
         // 스냅샷으로 복원
@@ -412,25 +461,56 @@ class _UndoAction {
     }
   }
 
-  /// Redo를 위한 역방향 액션 생성
+  /// Redo 실행 (정방향 적용)
+  void redo(List<Stroke> strokes) {
+    switch (type) {
+      case _UndoActionType.add:
+        // 스트로크 다시 추가 (단일 또는 그룹)
+        if (addedStrokes != null && addedStrokes!.isNotEmpty) {
+          strokes.addAll(addedStrokes!);
+        } else if (addedStroke != null) {
+          strokes.add(addedStroke!);
+        }
+        break;
+      case _UndoActionType.erase:
+        // 다시 지우기: 원본 제거하고 분할된 스트로크 추가
+        if (removedStrokes != null) {
+          final idsToRemove = removedStrokes!.map((s) => s.id).toSet();
+          strokes.removeWhere((s) => idsToRemove.contains(s.id));
+        }
+        if (addedStrokes != null) {
+          strokes.addAll(addedStrokes!);
+        }
+        break;
+      case _UndoActionType.replace:
+        // 스냅샷으로 복원
+        strokes.clear();
+        strokes.addAll(snapshot!);
+        break;
+    }
+  }
+
+  /// Undo를 위한 역방향 액션 생성 (redo 스택에 저장)
   _UndoAction createInverse(List<Stroke> currentStrokes) {
     switch (type) {
       case _UndoActionType.add:
-        // redo: 다시 추가
+        // undo된 add 액션 → redo 시 다시 추가해야 함
+        // 원본 add 액션을 그대로 반환 (redo()가 다시 추가 수행)
         return _UndoAction._(
-          type: _UndoActionType.erase,
-          removedStrokes: [],
-          addedStrokes: [addedStroke!],
+          type: _UndoActionType.add,
+          addedStroke: addedStroke,
+          addedStrokes: addedStrokes,
         );
       case _UndoActionType.erase:
-        // redo: 다시 지우기
+        // undo된 erase 액션 → redo 시 다시 지워야 함
+        // 원본 erase 액션을 그대로 반환 (redo()가 다시 지우기 수행)
         return _UndoAction._(
           type: _UndoActionType.erase,
-          removedStrokes: addedStrokes,
-          addedStrokes: removedStrokes,
+          removedStrokes: removedStrokes,
+          addedStrokes: addedStrokes,
         );
       case _UndoActionType.replace:
-        // redo: 현재 상태를 스냅샷으로
+        // undo된 replace 액션 → redo 시 현재 상태로 복원
         return _UndoAction.replace(List.from(currentStrokes));
     }
   }

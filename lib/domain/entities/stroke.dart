@@ -96,14 +96,15 @@ class Stroke {
   /// 압력에 따른 실제 굵기 계산 (비선형 곡선 적용)
   /// - 시그모이드 곡선으로 자연스러운 필압 반응
   /// - 낮은 압력에서는 완만하게, 중간에서 급격히, 높은 압력에서 다시 완만
-  double getWidthAtPressure(double pressure) {
+  /// - sensitivity: 필압 민감도 (0.4=부드러움, 0.6=보통, 0.8=강함)
+  double getWidthAtPressure(double pressure, [double sensitivity = 0.6]) {
     // 압력 범위: 0.0 ~ 1.0
     final clampedPressure = pressure.clamp(0.0, 1.0);
 
     // 비선형 곡선 (파워 곡선) - 더 자연스러운 필기감
-    // pow(pressure, 0.6)은 낮은 압력에서 반응성을 높이고
-    // 높은 압력에서 부드러운 전환을 제공
-    final curved = math.pow(clampedPressure, 0.6);
+    // sensitivity가 낮을수록 낮은 압력에서 더 민감하게 반응
+    // sensitivity가 높을수록 높은 압력에서만 굵어짐
+    final curved = math.pow(clampedPressure, sensitivity);
 
     // 굵기 배율: 0.3x ~ 1.8x (기존보다 더 넓은 범위)
     final multiplier = 0.3 + curved * 1.5;

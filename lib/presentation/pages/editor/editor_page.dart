@@ -20,18 +20,24 @@ import '../../../core/services/stroke_smoothing_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/backup_service.dart';
 import '../../../core/services/cloud_sync_service.dart';
+import '../../../core/services/feedback_service.dart';
 import '../../widgets/canvas/drawing_canvas.dart';
-import '../../widgets/toolbar/drawing_toolbar.dart';
 import '../../widgets/toolbar/quick_toolbar.dart';
 import '../../widgets/toolbar/image_edit_toolbar.dart';
 import '../settings/settings_page.dart';
+import '../scanner/scanner_page.dart';
+import '../scanner/filter_page.dart';
 
 class EditorPage extends ConsumerStatefulWidget {
   final String noteId;
 
+  /// 스캔 이미지를 바로 배경으로 열 때 사용
+  final String? initialBackgroundImagePath;
+
   const EditorPage({
     super.key,
     required this.noteId,
+    this.initialBackgroundImagePath,
   });
 
   @override
@@ -93,6 +99,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   Timer? _autoSaveTimer;
   bool _autoSaveEnabled = true;
   int _autoSaveDelay = 3; // seconds
+  bool _isSaving = false; // 저장 중 상태
 
   // Auto-sync (클라우드 동기화)
   bool _autoSyncEnabled = false;
@@ -105,6 +112,17 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
   // Debug overlay (from settings)
   bool _showDebugOverlay = false;
+
+  // 필압 민감도 (from settings)
+  double _pressureSensitivity = 0.6;
+
+  // S펜 호버 커서 표시 (from settings)
+  bool _penHoverCursorEnabled = true;
+
+  // UI/UX 모드 (from settings)
+  bool _fullscreenModeEnabled = false; // 풀스크린 모드 (도구바 숨기기)
+  bool _darkCanvasModeEnabled = false; // 다크 캔버스 모드 (검은 배경)
+  bool _leftHandedModeEnabled = false; // 왼손잡이 모드 (도구바 위치 반전)
 
   // 패널 닫기 콜백 (캔버스 터치 시 패널 닫기 위해)
   VoidCallback? _closePanelCallback;
@@ -159,8 +177,12 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     _currentTemplate = settings.defaultTemplate;
     _lassoColor = settings.lassoColor;
     _showDebugOverlay = settings.showDebugOverlay;
-    // 도형 자동 인식 설정 적용
-    StrokeSmoothingService.instance.shapeRecognitionEnabled = settings.shapeRecognitionEnabled;
+    _pressureSensitivity = settings.pressureSensitivity;
+    _penHoverCursorEnabled = settings.penHoverCursorEnabled;
+    // UI/UX 모드 설정
+    _fullscreenModeEnabled = settings.fullscreenModeEnabled;
+    _darkCanvasModeEnabled = settings.darkCanvasModeEnabled;
+    _leftHandedModeEnabled = settings.leftHandedModeEnabled;
   }
 
   /// 현재 도구에 맞는 색상 반환
@@ -247,13 +269,22 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     if (widget.noteId == 'new') {
       // Create new note
       _currentNote = _storageService.createNewNote();
+      // 스캔 이미지 배경: 첫 페이지의 backgroundImagePath에 직접 설정
+      // (_loadCurrentPageStrokes에서 page.backgroundImagePath를 읽으므로
+      //  여기서 setState만 하면 나중에 null로 덮어써짐)
+      if (widget.initialBackgroundImagePath != null) {
+        _currentNote = _currentNote!.updatePageBackground(
+          0,
+          backgroundImagePath: widget.initialBackgroundImagePath,
+          templateIndex: PageTemplate.customImage.index,
+        );
+        _backgroundImagePath = widget.initialBackgroundImagePath;
+        _currentTemplate = PageTemplate.customImage;
+      }
     } else {
       // Load existing note
       _currentNote = await _storageService.loadNote(widget.noteId);
-      if (_currentNote == null) {
-        // Note not found, create new
-        _currentNote = _storageService.createNewNote();
-      }
+      _currentNote ??= _storageService.createNewNote();
     }
 
     setState(() => _isLoading = false);
@@ -272,10 +303,15 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         final page = _currentNote!.pages[_currentPageIndex];
         strokes = page.strokes;
 
+        debugPrint('[EditorPage] 페이지 로드: pageIndex=$_currentPageIndex, templateIndex=${page.templateIndex}, overlayTemplateIndex=${page.overlayTemplateIndex}');
+
         // 페이지별 배경 이미지 및 오버레이 템플릿 로드
         setState(() {
           _backgroundImagePath = page.backgroundImagePath;
-          if (page.overlayTemplateIndex != null) {
+          // RangeError 방지: 범위 체크 후 템플릿 적용
+          if (page.overlayTemplateIndex != null &&
+              page.overlayTemplateIndex! >= 0 &&
+              page.overlayTemplateIndex! < PageTemplate.values.length) {
             _overlayTemplate = PageTemplate.values[page.overlayTemplateIndex!];
           } else {
             _overlayTemplate = null;
@@ -283,9 +319,13 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           // 배경 이미지가 있으면 템플릿을 customImage로, 없으면 templateIndex 사용
           if (page.backgroundImagePath != null) {
             _currentTemplate = PageTemplate.customImage;
-          } else if (page.templateIndex != null) {
+          } else if (page.templateIndex != null &&
+              page.templateIndex! >= 0 &&
+              page.templateIndex! < PageTemplate.values.length) {
             _currentTemplate = PageTemplate.values[page.templateIndex!];
           }
+          // templateIndex가 null이거나 범위 밖이면 기본 템플릿 유지 (변경하지 않음)
+          debugPrint('[EditorPage] 페이지 로드 완료: _currentTemplate=$_currentTemplate');
         });
       }
       _canvasKey.currentState?.loadStrokes(strokes);
@@ -320,6 +360,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       _currentNote = _currentNote!.updatePageShapes(pageNumber, mergedShapes);
 
       // 배경 이미지 및 오버레이 템플릿 저장
+      debugPrint('[EditorPage] 페이지 저장: pageNumber=$pageNumber, templateIndex=${_currentTemplate.index} ($_currentTemplate)');
       _currentNote = _currentNote!.updatePageBackground(
         pageNumber,
         backgroundImagePath: _backgroundImagePath,
@@ -328,6 +369,10 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         clearOverlayTemplateIndex: _overlayTemplate == null,
         templateIndex: _currentTemplate.index,
       );
+
+      // 저장 후 확인
+      final savedPage = _currentNote!.pages[_currentPageIndex];
+      debugPrint('[EditorPage] 페이지 저장 완료: templateIndex=${savedPage.templateIndex}');
     }
   }
 
@@ -340,11 +385,29 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     }
 
     return Shortcuts(
-      shortcuts: <ShortcutActivator, Intent>{
-        const SingleActivator(LogicalKeyboardKey.keyZ, control: true): const UndoIntent(),
-        const SingleActivator(LogicalKeyboardKey.keyY, control: true): const RedoIntent(),
-        const SingleActivator(LogicalKeyboardKey.keyZ, control: true, shift: true): const RedoIntent(),
-        const SingleActivator(LogicalKeyboardKey.keyS, control: true): const SaveIntent(),
+      shortcuts: const <ShortcutActivator, Intent>{
+        // Undo/Redo/Save
+        SingleActivator(LogicalKeyboardKey.keyZ, control: true): UndoIntent(),
+        SingleActivator(LogicalKeyboardKey.keyY, control: true): RedoIntent(),
+        SingleActivator(LogicalKeyboardKey.keyZ, control: true, shift: true): RedoIntent(),
+        SingleActivator(LogicalKeyboardKey.keyS, control: true): SaveIntent(),
+        // Tool switching (P=Pen, E=Eraser, H=Highlighter, L=Lasso)
+        SingleActivator(LogicalKeyboardKey.keyP): PenToolIntent(),
+        SingleActivator(LogicalKeyboardKey.keyE): EraserToolIntent(),
+        SingleActivator(LogicalKeyboardKey.keyH): HighlighterToolIntent(),
+        SingleActivator(LogicalKeyboardKey.keyL): LassoToolIntent(),
+        // Fit to screen (F 또는 Home)
+        SingleActivator(LogicalKeyboardKey.keyF): FitToScreenIntent(),
+        SingleActivator(LogicalKeyboardKey.home): FitToScreenIntent(),
+        // Delete selection (Delete/Backspace)
+        SingleActivator(LogicalKeyboardKey.delete): DeleteSelectionIntent(),
+        SingleActivator(LogicalKeyboardKey.backspace): DeleteSelectionIntent(),
+        // Pen presets (1~5)
+        SingleActivator(LogicalKeyboardKey.digit1): PresetIntent(0),
+        SingleActivator(LogicalKeyboardKey.digit2): PresetIntent(1),
+        SingleActivator(LogicalKeyboardKey.digit3): PresetIntent(2),
+        SingleActivator(LogicalKeyboardKey.digit4): PresetIntent(3),
+        SingleActivator(LogicalKeyboardKey.digit5): PresetIntent(4),
       },
       child: Actions(
         actions: <Type, Action<Intent>>{
@@ -372,6 +435,60 @@ class _EditorPageState extends ConsumerState<EditorPage> {
               return null;
             },
           ),
+          PenToolIntent: CallbackAction<PenToolIntent>(
+            onInvoke: (_) {
+              setState(() => _currentTool = DrawingTool.pen);
+              return null;
+            },
+          ),
+          EraserToolIntent: CallbackAction<EraserToolIntent>(
+            onInvoke: (_) {
+              setState(() => _currentTool = DrawingTool.eraser);
+              return null;
+            },
+          ),
+          HighlighterToolIntent: CallbackAction<HighlighterToolIntent>(
+            onInvoke: (_) {
+              setState(() => _currentTool = DrawingTool.highlighter);
+              return null;
+            },
+          ),
+          LassoToolIntent: CallbackAction<LassoToolIntent>(
+            onInvoke: (_) {
+              setState(() => _currentTool = DrawingTool.lasso);
+              return null;
+            },
+          ),
+          FitToScreenIntent: CallbackAction<FitToScreenIntent>(
+            onInvoke: (_) {
+              _canvasKey.currentState?.fitToScreen();
+              return null;
+            },
+          ),
+          DeleteSelectionIntent: CallbackAction<DeleteSelectionIntent>(
+            onInvoke: (_) {
+              // 스트로크 선택이 있으면 스트로크 삭제
+              if (_canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false) {
+                _canvasKey.currentState?.deleteSelection();
+              }
+              // 이미지 선택이 있으면 이미지 삭제
+              else if (_canvasKey.currentState?.selectedImage != null) {
+                _canvasKey.currentState?.deleteSelectedImage();
+                setState(() => _showImageEditToolbar = false);
+              }
+              // 도형 선택이 있으면 도형 삭제
+              else if (_canvasKey.currentState?.selectedShape != null) {
+                _canvasKey.currentState?.deleteSelectedShape();
+              }
+              return null;
+            },
+          ),
+          PresetIntent: CallbackAction<PresetIntent>(
+            onInvoke: (intent) {
+              _applyPenPreset(intent.presetIndex);
+              return null;
+            },
+          ),
         },
         child: Focus(
           autofocus: true,
@@ -383,7 +500,19 @@ class _EditorPageState extends ConsumerState<EditorPage> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(_currentNote?.title ?? '새 노트'),
-              if (_hasChanges)
+              if (_isSaving)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                    ),
+                  ),
+                )
+              else if (_hasChanges)
                 const Padding(
                   padding: EdgeInsets.only(left: 4),
                   child: Text('*', style: TextStyle(color: Colors.orange)),
@@ -410,7 +539,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           IconButton(
             icon: const Icon(Icons.save),
             tooltip: '저장',
-            onPressed: _saveNote,
+            onPressed: () => _saveNote(showFeedback: true),
           ),
           IconButton(
             icon: const Icon(Icons.more_vert),
@@ -420,12 +549,17 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       ),
       body: Column(
         children: [
-          // Quick toolbar - 노트 영역 위에 배치
+          // Quick toolbar - 노트 영역 위에 배치 (풀스크린 모드에서는 숨김)
+          if (!_fullscreenModeEnabled)
           Container(
             padding: const EdgeInsets.symmetric(vertical: 8),
-            color: Colors.grey[100],
-            child: Center(
-              child: QuickToolbar(
+            color: _darkCanvasModeEnabled ? Colors.grey[850] : Colors.grey[100],
+            child: _leftHandedModeEnabled
+              ? Align(
+                  alignment: Alignment.centerRight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 16),
+                    child: QuickToolbar(
                 currentTool: _currentTool,
                 currentColor: _penColor,
                 highlighterColor: _highlighterColor,
@@ -443,9 +577,122 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                 },
                 onColorChanged: (color) {
                   setState(() => _penColor = color);
+                  // 최근 사용 색상에 추가
+                  SettingsService.instance.addRecentColor(color);
                 },
                 onHighlighterColorChanged: (color) {
                   setState(() => _highlighterColor = color);
+                  // 최근 사용 색상에 추가
+                  SettingsService.instance.addRecentColor(color);
+                },
+                onWidthChanged: (width) {
+                  setState(() => _penWidth = width);
+                },
+                onHighlighterWidthChanged: (width) {
+                  setState(() => _highlighterWidth = width);
+                },
+                onEraserWidthChanged: (width) {
+                  setState(() => _eraserWidth = width);
+                },
+                onHighlighterOpacityChanged: (opacity) {
+                  setState(() => _highlighterOpacity = opacity);
+                },
+                onTemplateChanged: (template) {
+                  debugPrint('[EditorPage] 템플릿 변경: $template (index=${template.index}), 배경이미지=${_backgroundImagePath != null}');
+                  setState(() {
+                    if (_backgroundImagePath != null) {
+                      if (template == PageTemplate.blank) {
+                        _overlayTemplate = null;
+                      } else {
+                        _overlayTemplate = template;
+                      }
+                    } else {
+                      _currentTemplate = template;
+                    }
+                    _hasChanges = true;
+                    debugPrint('[EditorPage] 템플릿 변경 완료: _currentTemplate=$_currentTemplate');
+                  });
+                },
+                onCopySelection: () {
+                  _canvasKey.currentState?.copySelection();
+                  _updateUndoRedoState();
+                  setState(() => _hasChanges = true);
+                },
+                onDeleteSelection: () {
+                  _canvasKey.currentState?.deleteSelection();
+                  _updateUndoRedoState();
+                  setState(() => _hasChanges = true);
+                },
+                onClearSelection: () {
+                  _canvasKey.currentState?.clearSelection();
+                  setState(() {});
+                },
+                onInsertImage: _insertImage,
+                onInsertText: _insertTextBox,
+                onInsertTable: _showInsertTableDialog,
+                onScanDocument: _scanDocument,
+                onSelectBackgroundImage: _selectBackgroundImage,
+                onClearBackgroundImage: _clearBackgroundImage,
+                hasBackgroundImage: _backgroundImagePath != null,
+                overlayTemplate: _overlayTemplate,
+                laserPointerColor: _laserPointerColor,
+                onLaserPointerColorChanged: (color) {
+                  setState(() => _laserPointerColor = color);
+                },
+                presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
+                onPresentationHighlighterFadeChanged: (enabled) {
+                  setState(() => _presentationHighlighterFadeEnabled = enabled);
+                },
+                presentationHighlighterFadeSpeed: _presentationHighlighterFadeSpeed,
+                onPresentationHighlighterFadeSpeedChanged: (speed) {
+                  setState(() => _presentationHighlighterFadeSpeed = speed);
+                },
+                onPanelOpened: (closeCallback) {
+                  _closePanelCallback = closeCallback;
+                },
+                // Undo/Redo/Save/Clear
+                onUndo: () {
+                  _canvasKey.currentState?.undo();
+                  _updateUndoRedoState();
+                },
+                onRedo: () {
+                  _canvasKey.currentState?.redo();
+                  _updateUndoRedoState();
+                },
+                onSave: _saveNote,
+                onClear: _showClearConfirmDialog,
+                canUndo: _canUndoNotifier.value,
+                canRedo: _canRedoNotifier.value,
+                hasChanges: _hasChanges,
+              ),
+            ),
+          )
+              : Center(
+                  child: QuickToolbar(
+                currentTool: _currentTool,
+                currentColor: _penColor,
+                highlighterColor: _highlighterColor,
+                currentWidth: _penWidth,
+                highlighterWidth: _highlighterWidth,
+                eraserWidth: _eraserWidth,
+                highlighterOpacity: _highlighterOpacity,
+                currentTemplate: _currentTemplate,
+                hasSelection: _canvasKey.currentState?.selectedStrokes.isNotEmpty ?? false,
+                onToolChanged: (tool) {
+                  setState(() => _currentTool = tool);
+                  if (tool != DrawingTool.lasso) {
+                    _canvasKey.currentState?.clearSelection();
+                  }
+                },
+                onColorChanged: (color) {
+                  setState(() => _penColor = color);
+                  // 최근 사용 색상에 추가
+                  SettingsService.instance.addRecentColor(color);
+                },
+                onHighlighterColorChanged: (color) {
+                  setState(() => _highlighterColor = color);
+                  // 최근 사용 색상에 추가
+                  SettingsService.instance.addRecentColor(color);
                 },
                 onWidthChanged: (width) {
                   setState(() => _penWidth = width);
@@ -490,6 +737,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                 onInsertImage: _insertImage,
                 onInsertText: _insertTextBox,
                 onInsertTable: _showInsertTableDialog,
+                onScanDocument: _scanDocument,
                 onSelectBackgroundImage: _selectBackgroundImage,
                 onClearBackgroundImage: _clearBackgroundImage,
                 hasBackgroundImage: _backgroundImagePath != null,
@@ -509,7 +757,6 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                 onPanelOpened: (closeCallback) {
                   _closePanelCallback = closeCallback;
                 },
-                // Undo/Redo/Save/Clear
                 onUndo: () {
                   _canvasKey.currentState?.undo();
                   _updateUndoRedoState();
@@ -524,7 +771,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                 canRedo: _canRedoNotifier.value,
                 hasChanges: _hasChanges,
               ),
-            ),
+                ),
           ),
           // Canvas - A4 비율로 화면 가득 채움
           Expanded(
@@ -538,10 +785,13 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                 // 용지 - 화면 전체를 A4 비율로 채움
                 Positioned.fill(
                   child: Container(
-                    color: _getCurrentPagePdfBackground() == null ? Colors.white : Colors.transparent,
+                    color: _getCurrentPagePdfBackground() == null
+                        ? (_darkCanvasModeEnabled ? const Color(0xFF1E1E1E) : Colors.white)
+                        : Colors.transparent,
                     child: DrawingCanvas(
                             key: _canvasKey,
                             strokeColor: _currentColor,
+                            darkCanvasMode: _darkCanvasModeEnabled,
                             strokeWidth: _currentWidth,
                             highlighterColor: _highlighterColor, // 형광펜 전용 색상
                             highlighterWidth: _highlighterWidth, // 형광펜 전용 굵기
@@ -557,7 +807,11 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                             presentationHighlighterFadeEnabled: _presentationHighlighterFadeEnabled,
                             presentationHighlighterFadeSpeed: _presentationHighlighterFadeSpeed,
                             showDebugOverlay: _showDebugOverlay,
-                            initialShapes: _currentNote?.getShapesForPage(_currentPageIndex),
+                            pressureSensitivity: _pressureSensitivity,
+                            penHoverCursorEnabled: _penHoverCursorEnabled,
+                            initialShapes: _currentNote != null && _currentPageIndex < _currentNote!.pages.length
+                                ? _currentNote!.getShapesForPage(_currentNote!.pages[_currentPageIndex].pageNumber)
+                                : null,
                             onStrokesChanged: (strokes) {
                               _updateUndoRedoState();
                               // setState 없이 내부 상태만 변경 (AppBar 타이틀에 * 표시 필요시에만 rebuild)
@@ -628,11 +882,39 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                         },
                       ),
                     ),
+                  // 풀스크린 모드 토글 버튼 (풀스크린 모드일 때만 표시)
+                  if (_fullscreenModeEnabled)
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: Material(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(20),
+                        child: InkWell(
+                          onTap: () {
+                            setState(() {
+                              _fullscreenModeEnabled = false;
+                            });
+                            // 설정도 함께 저장
+                            SettingsService.instance.setFullscreenModeEnabled(false);
+                          },
+                          borderRadius: BorderRadius.circular(20),
+                          child: const Padding(
+                            padding: EdgeInsets.all(8),
+                            child: Icon(Icons.fullscreen_exit, color: Colors.white, size: 24),
+                          ),
+                        ),
+                      ),
+                    ),
               ],
             ),
           ),
-          // Page navigation bar
+          // Page navigation bar (풀스크린 모드에서도 표시 - 페이지 이동 필요)
+          if (!_fullscreenModeEnabled)
           _buildPageNavigationBar(),
+          // 풀스크린 모드용 미니 네비게이션 바
+          if (_fullscreenModeEnabled)
+            _buildMiniPageNavigationBar(),
         ],
       ),
     ),
@@ -650,8 +932,8 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     return Container(
       height: 56,
       decoration: BoxDecoration(
-        color: Colors.grey[100],
-        border: Border(top: BorderSide(color: Colors.grey[300]!)),
+        color: _darkCanvasModeEnabled ? Colors.grey[850] : Colors.grey[100],
+        border: Border(top: BorderSide(color: _darkCanvasModeEnabled ? Colors.grey[700]! : Colors.grey[300]!)),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -735,21 +1017,90 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
           const SizedBox(width: 8),
 
-          // Add page button (분리)
+          // Page action buttons (추가/삭제)
           Container(
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(20),
               border: Border.all(color: Colors.grey[300]!),
             ),
-            child: IconButton(
-              icon: const Icon(Icons.add),
-              onPressed: _addNewPage,
-              tooltip: '페이지 추가',
-              iconSize: 24,
-              padding: const EdgeInsets.all(8),
-              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 페이지 추가 버튼
+                IconButton(
+                  icon: const Icon(Icons.add),
+                  onPressed: _addNewPage,
+                  tooltip: '페이지 추가',
+                  iconSize: 24,
+                  padding: const EdgeInsets.all(8),
+                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                ),
+                // 페이지 삭제 버튼 (2페이지 이상일 때만 표시)
+                if (pageCount > 1)
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline, color: Colors.red),
+                    onPressed: () => _showDeletePageDialog(_currentPageIndex),
+                    tooltip: '현재 페이지 삭제',
+                    iconSize: 24,
+                    padding: const EdgeInsets.all(8),
+                    constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                  ),
+              ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 풀스크린 모드용 미니 페이지 네비게이션 바
+  Widget _buildMiniPageNavigationBar() {
+    final pageCount = _currentNote?.pageCount ?? 1;
+
+    return Container(
+      height: 40,
+      decoration: BoxDecoration(
+        color: _darkCanvasModeEnabled ? Colors.grey[900] : Colors.grey[200],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // Previous page
+          IconButton(
+            icon: Icon(Icons.chevron_left,
+              color: _darkCanvasModeEnabled ? Colors.white70 : Colors.black54,),
+            onPressed: _currentPageIndex > 0 ? _goToPreviousPage : null,
+            iconSize: 20,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
+          // Page indicator
+          Text(
+            '${_currentPageIndex + 1} / $pageCount',
+            style: TextStyle(
+              fontSize: 12,
+              color: _darkCanvasModeEnabled ? Colors.white70 : Colors.black54,
+            ),
+          ),
+          // Next page
+          IconButton(
+            icon: Icon(Icons.chevron_right,
+              color: _darkCanvasModeEnabled ? Colors.white70 : Colors.black54,),
+            onPressed: _currentPageIndex < pageCount - 1 ? _goToNextPage : null,
+            iconSize: 20,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
+          const SizedBox(width: 8),
+          // Add page
+          IconButton(
+            icon: Icon(Icons.add,
+              color: _darkCanvasModeEnabled ? Colors.white70 : Colors.black54,),
+            onPressed: _addNewPage,
+            iconSize: 20,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           ),
         ],
       ),
@@ -784,8 +1135,32 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   void _addNewPage() {
     if (_currentNote == null) return;
 
+    // 현재 페이지의 스트로크와 템플릿 설정 저장
     _saveCurrentPageStrokes();
-    _currentNote = _currentNote!.addPage();
+
+    // 현재 UI에 표시된 템플릿 설정으로 새 페이지 생성
+    // (Note 모델의 템플릿이 null일 수 있으므로 UI 값 직접 사용)
+    final maxPageNumber = _currentNote!.pages.isEmpty
+        ? -1
+        : _currentNote!.pages.map((p) => p.pageNumber).reduce((a, b) => a > b ? a : b);
+
+    debugPrint('[EditorPage] 새 페이지 추가: 현재 템플릿=$_currentTemplate (index=${_currentTemplate.index}), 오버레이=$_overlayTemplate, 배경이미지=$_backgroundImagePath');
+
+    // 배경 이미지, 템플릿, 오버레이 템플릿 모두 복사
+    final newPage = NotePage(
+      pageNumber: maxPageNumber + 1,
+      strokes: [],
+      templateIndex: _currentTemplate.index,
+      overlayTemplateIndex: _overlayTemplate?.index,
+      backgroundImagePath: _backgroundImagePath,
+    );
+
+    debugPrint('[EditorPage] 새 페이지 생성됨: pageNumber=${newPage.pageNumber}, templateIndex=${newPage.templateIndex}');
+
+    _currentNote = _currentNote!.copyWith(
+      pages: [..._currentNote!.pages, newPage],
+      modifiedAt: DateTime.now(),
+    );
     _currentPageIndex = _currentNote!.pageCount - 1;
     _hasChanges = true;
 
@@ -932,7 +1307,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
   }) {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
-      color: isCurrentPage ? Colors.blue.withOpacity(0.1) : null,
+      color: isCurrentPage ? Colors.blue.withValues(alpha: 0.1 ) : null,
       child: InkWell(
         onTap: onTap,
         child: Padding(
@@ -1040,9 +1415,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       _currentNote = _currentNote!.duplicatePage(pageNumber);
       _hasChanges = true;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('페이지가 복제되었습니다'), duration: Duration(seconds: 1)),
-    );
+    FeedbackService.instance.showSuccess(context, '페이지가 복제되었습니다', duration: const Duration(seconds: 2));
   }
 
   /// 페이지 순서 변경
@@ -1087,7 +1460,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
           boxShadow: isCurrentPage
               ? [
                   BoxShadow(
-                    color: Colors.blue.withOpacity(0.2),
+                    color: Colors.blue.withValues(alpha: 0.2 ),
                     blurRadius: 8,
                     offset: const Offset(0, 2),
                   ),
@@ -1146,7 +1519,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                     child: Container(
                       padding: const EdgeInsets.all(2),
                       decoration: BoxDecoration(
-                        color: Colors.red.withOpacity(0.9),
+                        color: Colors.red.withValues(alpha: 0.9 ),
                         shape: BoxShape.circle,
                       ),
                       child: const Icon(
@@ -1171,7 +1544,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                     end: Alignment.bottomCenter,
                     colors: [
                       Colors.transparent,
-                      Colors.black.withOpacity(0.5),
+                      Colors.black.withValues(alpha: 0.5 ),
                     ],
                   ),
                   borderRadius: const BorderRadius.only(
@@ -1266,15 +1639,64 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     }
   }
 
-  Future<void> _saveNote() async {
+  /// 펜 프리셋 적용 (키보드 단축키 1~5)
+  void _applyPenPreset(int index) {
+    final presets = SettingsService.instance.penPresets;
+    if (index < 0 || index >= presets.length) return;
+
+    final preset = presets[index];
+    final color = Color(preset['color'] as int);
+    final width = (preset['width'] as num).toDouble();
+    final toolType = preset['toolType'] as String? ?? 'pen';
+
+    setState(() {
+      if (toolType == 'highlighter') {
+        _currentTool = DrawingTool.highlighter;
+        _highlighterColor = color;
+        _highlighterWidth = width;
+      } else {
+        _currentTool = DrawingTool.pen;
+        _penColor = color;
+        _penWidth = width;
+      }
+    });
+  }
+
+  Future<void> _saveNote({bool showFeedback = false}) async {
     if (_currentNote == null) return;
+
+    // 저장 중 상태 표시
+    setState(() => _isSaving = true);
 
     // Save current page strokes first
     _saveCurrentPageStrokes();
 
-    await _storageService.saveNote(_currentNote!);
+    final success = await _storageService.saveNote(_currentNote!);
+    final feedback = FeedbackService.instance;
 
-    setState(() => _hasChanges = false);
+    if (success) {
+      setState(() {
+        _hasChanges = false;
+        _isSaving = false;
+      });
+
+      // 실시간 동기화가 활성화되어 있으면 즉시 업로드
+      final cloudSync = CloudSyncService.instance;
+      if (cloudSync.isEnabled && cloudSync.isRealtimeSyncEnabled) {
+        debugPrint('[Editor] 실시간 동기화 시작: ${_currentNote!.title}');
+        final uploaded = await cloudSync.uploadNoteImmediately(_currentNote!);
+        debugPrint('[Editor] 실시간 동기화 결과: $uploaded');
+      }
+
+      // 수동 저장 시 시각적 피드백 표시
+      if (showFeedback && mounted) {
+        feedback.showSaveSuccess(context, title: _currentNote?.title);
+      }
+    } else if (mounted) {
+      setState(() => _isSaving = false);
+      // 저장 실패 시 에러 표시
+      feedback.showSaveError(context, error: '다시 시도해주세요');
+    }
   }
 
   /// 즐겨찾기 토글
@@ -1455,6 +1877,32 @@ class _EditorPageState extends ConsumerState<EditorPage> {
 
                 const Divider(height: 24),
 
+                // 화면 모드 섹션
+                _buildMenuSection('화면', Icons.display_settings_outlined, [
+                  _buildMenuToggleItem(
+                    Icons.fullscreen,
+                    '풀스크린 모드',
+                    _fullscreenModeEnabled,
+                    (value) {
+                      Navigator.pop(context);
+                      setState(() => _fullscreenModeEnabled = value);
+                      SettingsService.instance.setFullscreenModeEnabled(value);
+                    },
+                  ),
+                  _buildMenuToggleItem(
+                    Icons.dark_mode,
+                    '다크 캔버스',
+                    _darkCanvasModeEnabled,
+                    (value) {
+                      Navigator.pop(context);
+                      setState(() => _darkCanvasModeEnabled = value);
+                      SettingsService.instance.setDarkCanvasModeEnabled(value);
+                    },
+                  ),
+                ]),
+
+                const Divider(height: 24),
+
                 // 설정 섹션
                 _buildMenuSection('설정', Icons.settings_outlined, [
                   _buildMenuItem(
@@ -1547,6 +1995,43 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     );
   }
 
+  /// 메뉴 토글 아이템 빌드 (On/Off 스위치)
+  Widget _buildMenuToggleItem(IconData icon, String label, bool value, void Function(bool) onChanged) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      color: value ? Theme.of(context).primaryColor.withValues(alpha: 0.1 ) : null,
+      child: InkWell(
+        onTap: () => onChanged(!value),
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 24, color: value ? Theme.of(context).primaryColor : null),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: value ? Theme.of(context).primaryColor : null,
+                  fontWeight: value ? FontWeight.bold : null,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              Icon(
+                value ? Icons.toggle_on : Icons.toggle_off,
+                size: 20,
+                color: value ? Theme.of(context).primaryColor : Colors.grey,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _openSettings() async {
     await Navigator.push(
       context,
@@ -1567,7 +2052,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     if (_currentNote == null) return;
 
     final tagController = TextEditingController();
-    List<String> currentTags = List.from(_currentNote!.tags);
+    final List<String> currentTags = List.from(_currentNote!.tags);
 
     showDialog(
       context: context,
@@ -1710,6 +2195,40 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     );
   }
 
+  /// 문서 스캔 기능 (에디터에서 진입)
+  Future<void> _scanDocument() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        settings: const RouteSettings(name: 'scanner_from_editor'),
+        builder: (_) => ScannerPage(
+          entryMode: ScanEntryMode.fromEditor,
+          onResult: (imagePath, mode) {
+            switch (mode) {
+              case ScanInsertMode.image:
+                // 캔버스에 이미지로 삽입
+                _canvasKey.currentState?.addImage(imagePath);
+                setState(() => _hasChanges = true);
+                break;
+              case ScanInsertMode.background:
+                // 배경 이미지로 설정
+                setState(() {
+                  if (_currentTemplate != PageTemplate.blank &&
+                      _currentTemplate != PageTemplate.customImage) {
+                    _overlayTemplate = _currentTemplate;
+                  }
+                  _backgroundImagePath = imagePath;
+                  _currentTemplate = PageTemplate.customImage;
+                  _hasChanges = true;
+                });
+                _scheduleAutoSave();
+                break;
+            }
+          },
+        ),
+      ),
+    );
+  }
+
   Future<void> _insertImage() async {
     try {
       final picker = ImagePicker();
@@ -1773,16 +2292,12 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       _scheduleAutoSave();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('배경 이미지가 설정되었습니다'), duration: Duration(seconds: 2)),
-        );
+        FeedbackService.instance.showSuccess(context, '배경 이미지가 설정되었습니다');
       }
     } catch (e) {
       debugPrint('배경 이미지 선택 실패: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('배경 이미지 선택 실패: $e'), backgroundColor: Colors.red),
-        );
+        FeedbackService.instance.showError(context, '배경 이미지 선택 실패: $e');
       }
     }
   }
@@ -1879,7 +2394,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                   Navigator.pop(context);
                 }
               },
-            )),
+            ),),
           ],
         ),
         actions: [
@@ -2034,7 +2549,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
                   onPressed: () async {
                     Navigator.pop(context);
                     // Open the folder
-                    final folder = filePath!.substring(0, filePath!.lastIndexOf('\\'));
+                    final folder = filePath!.substring(0, filePath.lastIndexOf('\\'));
                     final uri = Uri.file(folder);
                     if (await canLaunchUrl(uri)) {
                       await launchUrl(uri);
@@ -2048,11 +2563,17 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         }
       } else {
         debugPrint('이미지 내보내기 실패');
+        if (mounted) {
+          FeedbackService.instance.showExportError(context, error: '이미지 생성 실패');
+        }
       }
     } catch (e) {
       // Close loading dialog on error
       if (mounted) Navigator.pop(context);
       debugPrint('이미지 내보내기 오류: $e');
+      if (mounted) {
+        FeedbackService.instance.showExportError(context, error: e.toString());
+      }
     }
   }
 
@@ -2320,11 +2841,17 @@ class _EditorPageState extends ConsumerState<EditorPage> {
         }
       } else {
         debugPrint('PDF 생성 실패');
+        if (mounted) {
+          FeedbackService.instance.showExportError(context, error: 'PDF 생성 실패');
+        }
       }
     } catch (e) {
       // Close loading dialog if still open
       if (mounted) Navigator.pop(context);
       debugPrint('PDF 생성 오류: $e');
+      if (mounted) {
+        FeedbackService.instance.showExportError(context, error: e.toString());
+      }
     }
   }
 
@@ -2378,6 +2905,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
     await _storageService.saveNote(_currentNote!);
 
     // 로딩 표시
+    final navigator = Navigator.of(context);
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -2396,7 +2924,7 @@ class _EditorPageState extends ConsumerState<EditorPage> {
       final success = await BackupService.instance.shareNote(_currentNote!);
 
       // 로딩 닫기
-      if (mounted) Navigator.pop(context);
+      if (mounted) navigator.pop();
 
       if (!success) {
         debugPrint('공유에 실패했습니다');
@@ -2507,4 +3035,33 @@ class RedoIntent extends Intent {
 
 class SaveIntent extends Intent {
   const SaveIntent();
+}
+
+class PenToolIntent extends Intent {
+  const PenToolIntent();
+}
+
+class EraserToolIntent extends Intent {
+  const EraserToolIntent();
+}
+
+class HighlighterToolIntent extends Intent {
+  const HighlighterToolIntent();
+}
+
+class LassoToolIntent extends Intent {
+  const LassoToolIntent();
+}
+
+class FitToScreenIntent extends Intent {
+  const FitToScreenIntent();
+}
+
+class DeleteSelectionIntent extends Intent {
+  const DeleteSelectionIntent();
+}
+
+class PresetIntent extends Intent {
+  final int presetIndex;
+  const PresetIntent(this.presetIndex);
 }

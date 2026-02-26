@@ -1,0 +1,60 @@
+{
+  "args": {
+    "model": "assets/models/lcnet050_p_multi_decoder_l3_d64_256_fp32.onnx",
+    "data": "tools/training/dataset",
+    "output": "tools/training/checkpoints",
+    "epochs": 20,
+    "batch_size": 64,
+    "lr": 5e-05,
+    "weight_decay": 1e-05,
+    "stage": 2,
+    "resume": null,
+    "export_onnx": false
+  },
+  "elapsed_seconds": 12074.016378641129,
+  "best_val_dist": 2.02342418970022,
+  "test_metrics": {
+    "loss": 0.1672333812075002,
+    "pts_loss": 1.994101505066023e-05,
+    "avg_corner_dist_px": 2.045680044458421,
+    "success_rate_10px": 1.0
+  },
+  "history": [
+    {
+      "epoch": 5,
+      "train_loss": 0.16602307166105934,
+      "train_pts": 3.0492893696154917e-05,
+      "val_loss": 0.16615708104201726,
+      "val_dist": 2.423682699884687,
+      "val_success": 1.0,
+      "lr": 4.2750892834367056e-05
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.16601536488692675,
+      "train_pts": 2.291611830110745e-05,
+      "val_loss": 0.166150873622724,
+      "val_dist": 2.155312043025081,
+      "val_success": 1.0,
+      "lr": 2.5250000000000004e-05
+    },
+    {
+      "epoch": 15,
+      "train_loss": 0.16601252089121513,
+      "train_pts": 2.0110549689401783e-05,
+      "val_loss": 0.16614869109221866,
+      "val_dist": 2.0515779668227174,
+      "val_success": 1.0,
+      "lr": 7.749107165632952e-06
+    },
+    {
+      "epoch": 20,
+      "train_loss": 0.16601166654378174,
+      "train_pts": 1.926176329461222e-05,
+      "val_loss": 0.16614809044769832,
+      "val_dist": 2.02342418970022,
+      "val_success": 1.0,
+      "lr": 5.000000000000001e-07
+    }
+  ]
+}

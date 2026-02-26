@@ -41,6 +41,9 @@ class BoundingBox {
   /// 중심점
   Offset get center => Offset((minX + maxX) / 2, (minY + maxY) / 2);
 
+  /// 빈 BoundingBox인지 확인
+  bool get isEmpty => minX == double.infinity || maxX == double.negativeInfinity;
+
   /// 포인트로 확장
   void expand(double x, double y) {
     if (x < minX) minX = x;

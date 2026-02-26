@@ -179,7 +179,7 @@ class AudioSyncService {
       stroke: stroke,
       recordingStartTime: startOffset,
       recordingEndTime: startOffset, // 단순화: 시작=종료
-    ));
+    ),);
 
     debugPrint('[AudioSync] Stroke added at ${startOffset}ms');
   }
@@ -367,7 +367,7 @@ class AudioSyncService {
   ) {
     return session.strokes
         .where((ts) =>
-            ts.recordingStartTime >= startMs && ts.recordingStartTime <= endMs)
+            ts.recordingStartTime >= startMs && ts.recordingStartTime <= endMs,)
         .map((ts) => ts.stroke)
         .toList();
   }
@@ -395,7 +395,7 @@ extension StrokeJson on Stroke {
         'pressure': p.pressure,
         'tilt': p.tilt,
         'timestamp': p.timestamp,
-      }).toList(),
+      },).toList(),
       'timestamp': timestamp,
       'isShape': isShape,
       'shapeType': shapeType.index,

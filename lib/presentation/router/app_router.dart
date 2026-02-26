@@ -7,6 +7,7 @@ import '../pages/library/library_page.dart';
 import '../pages/editor/editor_page.dart';
 import '../pages/pdf_viewer/pdf_viewer_page.dart';
 import '../pages/settings/settings_page.dart';
+import '../pages/scanner/scanner_page.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
@@ -27,7 +28,12 @@ final routerProvider = Provider<GoRouter>((ref) {
         name: 'editor',
         builder: (context, state) {
           final noteId = state.pathParameters['noteId'] ?? '';
-          return EditorPage(noteId: noteId);
+          final extra = state.extra as Map<String, dynamic>?;
+          final backgroundPath = extra?['initialBackgroundImagePath'] as String?;
+          return EditorPage(
+            noteId: noteId,
+            initialBackgroundImagePath: backgroundPath,
+          );
         },
       ),
       GoRoute(
@@ -37,6 +43,13 @@ final routerProvider = Provider<GoRouter>((ref) {
           final attachmentId = state.pathParameters['attachmentId'] ?? '';
           return PdfViewerPage(attachmentId: attachmentId);
         },
+      ),
+      GoRoute(
+        path: '/scanner',
+        name: 'scanner',
+        builder: (context, state) => const ScannerPage(
+          entryMode: ScanEntryMode.standalone,
+        ),
       ),
       GoRoute(
         path: '/settings',

@@ -116,6 +116,9 @@ class ImageExportService {
       // Convert to image
       final image = await picture.toImage(width, height);
 
+      // Picture 리소스 해제 (메모리 누수 방지)
+      picture.dispose();
+
       // Convert to bytes
       final byteData = await image.toByteData(
         format: format == 'png' ? ui.ImageByteFormat.png : ui.ImageByteFormat.rawRgba,

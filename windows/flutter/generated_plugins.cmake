@@ -3,14 +3,18 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  camera_windows
   file_selector_windows
   share_plus
+  speech_to_text_windows
   sqlite3_flutter_libs
   syncfusion_pdfviewer_windows
   url_launcher_windows
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
+  onnxruntime
+  opencv_dart
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)

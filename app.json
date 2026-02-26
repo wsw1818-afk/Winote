@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "winote",
+    "slug": "winote",
+    "version": "1.0.0",
+    "ios": {
+      "bundleIdentifier": "com.winote.winote"
+    },
+    "android": {
+      "package": "com.winote.winote"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "2831c157-a89a-4c91-83a3-f64a9b99a8d3"
+      }
+    }
+  }
+}

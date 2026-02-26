@@ -5,14 +5,10 @@ import '../../domain/entities/stroke_point.dart';
 
 /// 스트로크 래스터 캐싱 서비스
 /// - 완료된 스트로크를 이미지로 캐싱하여 렌더링 성능 향상
-/// - 타일 기반 캐싱으로 부분 업데이트 지원
-/// - 메모리 관리 (LRU 캐시)
+/// - 전체 스트로크 합성 캐시로 빠른 재그리기 지원
 class StrokeCacheService {
   static final StrokeCacheService instance = StrokeCacheService._();
   StrokeCacheService._();
-
-  // 캐시된 스트로크 이미지
-  final Map<String, ui.Image> _strokeCache = {};
 
   // 전체 캐시 이미지 (모든 스트로크 합성)
   ui.Image? _compositedCache;
@@ -21,14 +17,17 @@ class StrokeCacheService {
   // 캐시 무효화 추적
   int _strokeVersion = 0;
 
-  // 캐시 설정
-  static const int _maxCacheSize = 100; // 최대 개별 스트로크 캐시 수
-
-  /// 캐시 키 생성
+  /// 캐시 키 생성 (색상/굵기/타입 포함하여 변경 감지)
+  /// 주의: hashCode는 충돌 가능성이 있으나, _strokeVersion으로 완화됨
+  /// 대용량 노트에서 성능 우선으로 hashCode 사용 (SHA 해시는 성능 저하)
   String _generateCacheKey(List<Stroke> strokes) {
-    if (strokes.isEmpty) return 'empty';
-    final ids = strokes.map((s) => '${s.id}_${s.points.length}').join('_');
-    return 'strokes_${ids.hashCode}_$_strokeVersion';
+    if (strokes.isEmpty) return 'empty_$_strokeVersion';
+    // 색상, 굵기, 타입까지 포함하여 속성 변경 시 캐시 무효화
+    final ids = strokes.map((s) =>
+      '${s.id}_${s.points.length}_${s.color.value}_${s.width.toInt()}_${s.toolType.index}',
+    ).join('_');
+    // strokeVersion을 항상 포함하여 충돌 시에도 invalidate 가능
+    return 'strokes_${strokes.length}_${ids.hashCode}_$_strokeVersion';
   }
 
   /// 전체 캐시 유효성 확인
@@ -48,20 +47,13 @@ class StrokeCacheService {
     _compositedCacheKey = null;
   }
 
-  /// 개별 스트로크 캐시 삭제
+  /// 개별 스트로크 캐시 삭제 (전체 캐시 무효화)
   void invalidateStroke(String strokeId) {
-    final cached = _strokeCache.remove(strokeId);
-    cached?.dispose();
     invalidateCache();
   }
 
   /// 전체 캐시 클리어
   void clearAll() {
-    for (final image in _strokeCache.values) {
-      image.dispose();
-    }
-    _strokeCache.clear();
-
     _compositedCache?.dispose();
     _compositedCache = null;
     _compositedCacheKey = null;
@@ -102,6 +94,9 @@ class StrokeCacheService {
         canvasSize.height.ceil(),
       );
 
+      // Picture 리소스 해제 (메모리 누수 방지)
+      picture.dispose();
+
       // 이전 캐시 정리
       _compositedCache?.dispose();
 
@@ -110,6 +105,8 @@ class StrokeCacheService {
 
       return image;
     } catch (e) {
+      // 에러 시에도 Picture 해제
+      picture.dispose();
       return null;
     }
   }
@@ -158,14 +155,24 @@ class StrokeCacheService {
     return (maxP - minP) > 0.1;
   }
 
-  /// 가변 굵기 스트로크 그리기
+  /// 가변 굵기 스트로크 그리기 (필압 + 틸트 적용)
   void _drawVariableWidthStroke(Canvas canvas, Stroke stroke, Paint basePaint) {
     for (int i = 0; i < stroke.points.length - 1; i++) {
       final p1 = stroke.points[i];
       final p2 = stroke.points[i + 1];
 
       final pressure = (p1.pressure + p2.pressure) / 2;
-      final width = stroke.width * (0.5 + pressure * 0.8);
+      final tilt = (p1.tilt + p2.tilt) / 2;
+
+      // 필압 기반 굵기 (0.5 ~ 1.3 배율)
+      double width = stroke.width * (0.5 + pressure * 0.8);
+
+      // 틸트 적용: 기울일수록 굵어짐 (최대 1.5배)
+      // tilt 0 = 수직, tilt 1 = 완전히 눕힘
+      if (tilt > 0.1) {
+        final tiltMultiplier = 1.0 + (tilt * 0.5); // 1.0 ~ 1.5
+        width *= tiltMultiplier;
+      }
 
       final paint = Paint()
         ..color = basePaint.color
@@ -182,23 +189,60 @@ class StrokeCacheService {
   }
 }
 
-/// 타일 기반 캐시 (대형 캔버스용)
+/// 타일 기반 캐시 (대형 캔버스용) - LRU 캐시 적용
 class TileCache {
   static const double tileSize = 512.0;
+  static const int maxTiles = 100; // 최대 타일 수 (약 100MB 메모리 제한)
 
   final Map<String, ui.Image> _tiles = {};
+  final List<String> _accessOrder = []; // LRU 순서 추적
 
   /// 타일 키 생성
   String _tileKey(int tileX, int tileY) => 'tile_${tileX}_$tileY';
 
-  /// 타일 가져오기
-  ui.Image? getTile(int tileX, int tileY) => _tiles[_tileKey(tileX, tileY)];
+  /// 타일 개수
+  int get tileCount => _tiles.length;
 
-  /// 타일 저장
+  /// 타일 가져오기 (LRU 순서 업데이트)
+  ui.Image? getTile(int tileX, int tileY) {
+    final key = _tileKey(tileX, tileY);
+    final tile = _tiles[key];
+
+    if (tile != null) {
+      // LRU 순서 업데이트: 접근한 타일을 맨 뒤로 이동
+      _accessOrder.remove(key);
+      _accessOrder.add(key);
+    }
+
+    return tile;
+  }
+
+  /// 타일 저장 (LRU 캐시 제한 적용)
   void setTile(int tileX, int tileY, ui.Image image) {
     final key = _tileKey(tileX, tileY);
-    _tiles[key]?.dispose();
+
+    // 기존 타일 정리
+    if (_tiles.containsKey(key)) {
+      _tiles[key]?.dispose();
+      _accessOrder.remove(key);
+    }
+
+    // LRU 캐시 제한: 최대 개수 초과 시 가장 오래된 타일 제거
+    while (_tiles.length >= maxTiles) {
+      _evictOldestTile();
+    }
+
     _tiles[key] = image;
+    _accessOrder.add(key);
+  }
+
+  /// 가장 오래된 타일 제거 (LRU)
+  void _evictOldestTile() {
+    if (_accessOrder.isEmpty) return;
+
+    final oldestKey = _accessOrder.removeAt(0);
+    final oldTile = _tiles.remove(oldestKey);
+    oldTile?.dispose();
   }
 
   /// 특정 영역의 타일 무효화
@@ -213,6 +257,7 @@ class TileCache {
         final key = _tileKey(x, y);
         _tiles[key]?.dispose();
         _tiles.remove(key);
+        _accessOrder.remove(key);
       }
     }
   }
@@ -223,5 +268,6 @@ class TileCache {
       tile.dispose();
     }
     _tiles.clear();
+    _accessOrder.clear();
   }
 }

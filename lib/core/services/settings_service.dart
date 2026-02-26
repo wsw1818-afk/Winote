@@ -127,6 +127,10 @@ class SettingsService {
   // Default Template
   PageTemplate get defaultTemplate {
     final index = _settings['defaultTemplate'] as int? ?? PageTemplate.grid.index;
+    // 범위 체크: 유효하지 않은 인덱스면 기본값 반환
+    if (index < 0 || index >= PageTemplate.values.length) {
+      return PageTemplate.grid;
+    }
     return PageTemplate.values[index];
   }
 
@@ -204,6 +208,17 @@ class SettingsService {
 
   Future<void> setPalmRejectionEnabled(bool enabled) async {
     _settings['palmRejectionEnabled'] = enabled;
+    await _save();
+  }
+
+  // Palm rejection grace period (펜 사용 후 터치 무시 시간, 밀리초)
+  // 500 = 짧게 (빠른 전환)
+  // 1000 = 보통 (기본값)
+  // 2000 = 길게 (안전한 손바닥 무시)
+  int get palmRejectionGracePeriod => _settings['palmRejectionGracePeriod'] as int? ?? 1000;
+
+  Future<void> setPalmRejectionGracePeriod(int milliseconds) async {
+    _settings['palmRejectionGracePeriod'] = milliseconds.clamp(200, 3000);
     await _save();
   }
 
@@ -289,6 +304,57 @@ class SettingsService {
 
   Future<void> setShapeRecognitionEnabled(bool enabled) async {
     _settings['shapeRecognitionEnabled'] = enabled;
+    await _save();
+  }
+
+  // 필압 민감도 (Pressure Sensitivity)
+  // 0.4 = 부드러움 (가벼운 터치에 민감)
+  // 0.6 = 보통 (기본값)
+  // 0.8 = 강함 (힘줘야 굵어짐)
+  double get pressureSensitivity => (_settings['pressureSensitivity'] as num?)?.toDouble() ?? 0.6;
+
+  Future<void> setPressureSensitivity(double sensitivity) async {
+    _settings['pressureSensitivity'] = sensitivity.clamp(0.3, 1.0);
+    await _save();
+  }
+
+  // 3손가락 제스처 활성화
+  bool get threeFingerGestureEnabled => _settings['threeFingerGestureEnabled'] as bool? ?? true;
+
+  Future<void> setThreeFingerGestureEnabled(bool enabled) async {
+    _settings['threeFingerGestureEnabled'] = enabled;
+    await _save();
+  }
+
+  // S펜 호버 커서 표시
+  bool get penHoverCursorEnabled => _settings['penHoverCursorEnabled'] as bool? ?? true;
+
+  Future<void> setPenHoverCursorEnabled(bool enabled) async {
+    _settings['penHoverCursorEnabled'] = enabled;
+    await _save();
+  }
+
+  // 풀스크린 모드 (도구바 숨기기)
+  bool get fullscreenModeEnabled => _settings['fullscreenModeEnabled'] as bool? ?? false;
+
+  Future<void> setFullscreenModeEnabled(bool enabled) async {
+    _settings['fullscreenModeEnabled'] = enabled;
+    await _save();
+  }
+
+  // 다크 캔버스 모드 (검은 배경 + 밝은 잉크)
+  bool get darkCanvasModeEnabled => _settings['darkCanvasModeEnabled'] as bool? ?? false;
+
+  Future<void> setDarkCanvasModeEnabled(bool enabled) async {
+    _settings['darkCanvasModeEnabled'] = enabled;
+    await _save();
+  }
+
+  // 왼손잡이 모드 (도구바 위치 반전)
+  bool get leftHandedModeEnabled => _settings['leftHandedModeEnabled'] as bool? ?? false;
+
+  Future<void> setLeftHandedModeEnabled(bool enabled) async {
+    _settings['leftHandedModeEnabled'] = enabled;
     await _save();
   }
 }

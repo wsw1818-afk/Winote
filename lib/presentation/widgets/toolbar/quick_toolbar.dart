@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../core/providers/drawing_state.dart';
 import '../../../core/services/settings_service.dart';
 
@@ -30,6 +31,7 @@ class QuickToolbar extends StatefulWidget {
   final VoidCallback? onInsertImage;
   final VoidCallback? onInsertText;
   final VoidCallback? onInsertTable;
+  final VoidCallback? onScanDocument; // 문서 스캔
   // Background image callbacks (커스텀 배경 이미지)
   final VoidCallback? onSelectBackgroundImage;
   final VoidCallback? onClearBackgroundImage;
@@ -81,6 +83,7 @@ class QuickToolbar extends StatefulWidget {
     this.onInsertImage,
     this.onInsertText,
     this.onInsertTable,
+    this.onScanDocument,
     this.onSelectBackgroundImage,
     this.onClearBackgroundImage,
     this.hasBackgroundImage = false,
@@ -246,7 +249,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Colors.black.withValues(alpha: 0.1 ),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -328,14 +331,17 @@ class _QuickToolbarState extends State<QuickToolbar> {
       message: widget.hasChanges ? '저장 (변경사항 있음)' : '저장됨',
       child: InkWell(
         onTap: widget.hasChanges ? widget.onSave : null,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(8),
         child: Container(
-          padding: const EdgeInsets.all(6),
+          width: 48, // WCAG 권장 터치 타겟 크기
+          height: 48,
+          alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: widget.hasChanges ? Colors.orange.withOpacity(0.1) : null,
-            borderRadius: BorderRadius.circular(6),
+            color: widget.hasChanges ? Colors.orange.withValues(alpha: 0.1 ) : null,
+            borderRadius: BorderRadius.circular(8),
           ),
           child: Stack(
+            alignment: Alignment.center,
             children: [
               Icon(
                 widget.hasChanges ? Icons.save : Icons.check_circle_outline,
@@ -344,8 +350,8 @@ class _QuickToolbarState extends State<QuickToolbar> {
               ),
               if (widget.hasChanges)
                 Positioned(
-                  right: -2,
-                  top: -2,
+                  right: 10,
+                  top: 10,
                   child: Container(
                     width: 8,
                     height: 8,
@@ -358,114 +364,6 @@ class _QuickToolbarState extends State<QuickToolbar> {
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  /// 색상 관리 버튼 (현재 색상 추가 + 색상 목록 관리)
-  Widget _buildColorManagerButton(BuildContext context) {
-    final isCurrentColorInFavorites = _favoriteColors.any(
-      (c) => c.value == widget.currentColor.value,
-    );
-
-    return Tooltip(
-      message: '색상 관리',
-      child: PopupMenuButton<String>(
-        tooltip: '', // 기본 "Show menu" 툴팁 비활성화
-        offset: const Offset(0, -200),
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 2),
-          padding: const EdgeInsets.all(4),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: Colors.grey[300]!),
-          ),
-          child: const Icon(Icons.add, size: 16, color: Colors.grey),
-        ),
-        itemBuilder: (context) => [
-          // 현재 색상 추가/제거
-          PopupMenuItem<String>(
-            value: 'toggle_current',
-            child: Row(
-              children: [
-                Container(
-                  width: 20,
-                  height: 20,
-                  decoration: BoxDecoration(
-                    color: widget.currentColor,
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: Colors.grey[300]!),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Text(isCurrentColorInFavorites ? '현재 색상 제거' : '현재 색상 추가'),
-                const Spacer(),
-                Icon(
-                  isCurrentColorInFavorites ? Icons.remove : Icons.add,
-                  size: 18,
-                  color: isCurrentColorInFavorites ? Colors.red : Colors.blue,
-                ),
-              ],
-            ),
-          ),
-          const PopupMenuDivider(),
-          // 즐겨찾기 색상 목록 표시
-          PopupMenuItem<String>(
-            enabled: false,
-            child: Text(
-              '즐겨찾기 색상 (${_favoriteColors.length}개)',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey[600],
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-          // 각 색상을 롱프레스로 제거 가능하도록 표시
-          ..._favoriteColors.asMap().entries.map((entry) {
-            final index = entry.key;
-            final color = entry.value;
-            return PopupMenuItem<String>(
-              value: 'remove_$index',
-              child: Row(
-                children: [
-                  Container(
-                    width: 20,
-                    height: 20,
-                    decoration: BoxDecoration(
-                      color: color,
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.grey[300]!),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(_getColorName(color)),
-                  const Spacer(),
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 16, color: Colors.red),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: null, // PopupMenuItem이 처리
-                  ),
-                ],
-              ),
-            );
-          }),
-        ],
-        onSelected: (value) async {
-          if (value == 'toggle_current') {
-            if (isCurrentColorInFavorites) {
-              await _removeColorFromFavorites(widget.currentColor);
-            } else {
-              await _addColorToFavorites(widget.currentColor);
-            }
-          } else if (value.startsWith('remove_')) {
-            final index = int.parse(value.substring(7));
-            if (index < _favoriteColors.length) {
-              await _removeColorFromFavorites(_favoriteColors[index]);
-            }
-          }
-        },
       ),
     );
   }
@@ -486,7 +384,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: hasOverlay ? Colors.green.withOpacity(0.1) : Colors.blue.withOpacity(0.1),
+            color: hasOverlay ? Colors.green.withValues(alpha: 0.1 ) : Colors.blue.withValues(alpha: 0.1 ),
             borderRadius: BorderRadius.circular(6),
             border: widget.hasBackgroundImage
                 ? Border.all(color: hasOverlay ? Colors.green : Colors.orange, width: 1.5)
@@ -534,6 +432,9 @@ class _QuickToolbarState extends State<QuickToolbar> {
             case 'table':
               widget.onInsertTable?.call();
               break;
+            case 'scan':
+              widget.onScanDocument?.call();
+              break;
             case 'background':
               widget.onSelectBackgroundImage?.call();
               break;
@@ -546,7 +447,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: Colors.green.withOpacity(0.1),
+            color: Colors.green.withValues(alpha: 0.1 ),
             borderRadius: BorderRadius.circular(6),
           ),
           child: Row(
@@ -586,6 +487,16 @@ class _QuickToolbarState extends State<QuickToolbar> {
                 Icon(Icons.table_chart, size: 20),
                 SizedBox(width: 12),
                 Text('표'),
+              ],
+            ),
+          ),
+          const PopupMenuItem(
+            value: 'scan',
+            child: Row(
+              children: [
+                Icon(Icons.document_scanner, size: 20, color: Colors.teal),
+                SizedBox(width: 12),
+                Text('문서 스캔'),
               ],
             ),
           ),
@@ -812,7 +723,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
                                 height: 18,
                                 decoration: BoxDecoration(
                                   color: toolType == 'highlighter'
-                                      ? color.withOpacity(0.4)
+                                      ? color.withValues(alpha: 0.4 )
                                       : color,
                                   shape: BoxShape.circle,
                                   border: Border.all(color: Colors.grey[300]!),
@@ -848,7 +759,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
                           ),
                         ),
                       );
-                    }).toList(),
+                    }),
                     if (_settings.penPresets.isEmpty)
                       Container(
                         padding: const EdgeInsets.all(10),
@@ -917,10 +828,9 @@ class _QuickToolbarState extends State<QuickToolbar> {
                   'width': width,
                   'toolType': toolType,
                 });
-                Navigator.pop(dialogContext);
-                _closeOverlay();
-                // 패널 다시 열어서 업데이트된 목록 보여주기
                 if (mounted) {
+                  Navigator.pop(dialogContext);
+                  _closeOverlay();
                   setState(() {});
                 }
               },
@@ -947,9 +857,9 @@ class _QuickToolbarState extends State<QuickToolbar> {
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
               await _settings.removePenPreset(index);
-              Navigator.pop(dialogContext);
-              _closeOverlay();
               if (mounted) {
+                Navigator.pop(dialogContext);
+                _closeOverlay();
                 setState(() {});
               }
             },
@@ -968,15 +878,18 @@ class _QuickToolbarState extends State<QuickToolbar> {
       message: '펜',
       child: GestureDetector(
         onTap: () {
+          HapticFeedback.selectionClick(); // 도구 전환 진동 피드백
           widget.onToolChanged(DrawingTool.pen);
           _showPenPanel(context);
         },
-        child: Container(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.blue.withOpacity(0.1) : null,
+            color: isSelected ? Colors.blue.withValues(alpha: 0.15 ) : null,
             borderRadius: BorderRadius.circular(6),
-            border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
+            border: isSelected ? Border.all(color: Colors.blue, width: 2) : null,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -1027,7 +940,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         onClose: _closeOverlay,
         defaultColors: _defaultColors,
       ),
-    ));
+    ),);
   }
 
   /// 형광펜 도구 버튼 (색상 + 굵기 + 투명도 가로 패널)
@@ -1040,6 +953,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
       message: '형광펜',
       child: GestureDetector(
         onTap: () {
+          HapticFeedback.selectionClick(); // 도구 전환 진동 피드백
           // 프레젠테이션 형광펜 사용 중이면 도구 변경하지 않고 패널만 표시
           // (색상/굵기/투명도 변경 시 프레젠테이션 형광펜 상태 유지)
           if (widget.currentTool != DrawingTool.presentationHighlighter) {
@@ -1047,12 +961,14 @@ class _QuickToolbarState extends State<QuickToolbar> {
           }
           _showHighlighterPanel(context);
         },
-        child: Container(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.blue.withOpacity(0.1) : null,
+            color: isSelected ? Colors.blue.withValues(alpha: 0.15 ) : null,
             borderRadius: BorderRadius.circular(6),
-            border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
+            border: isSelected ? Border.all(color: Colors.blue, width: 2) : null,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -1103,7 +1019,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         onOpacityChanged: widget.onHighlighterOpacityChanged,
         onClose: _closeOverlay,
       ),
-    ));
+    ),);
   }
 
   /// 지우개 도구 버튼 (굵기 가로 패널 + 영역 지우개 포함)
@@ -1117,17 +1033,20 @@ class _QuickToolbarState extends State<QuickToolbar> {
       message: '지우개',
       child: GestureDetector(
         onTap: () {
+          HapticFeedback.selectionClick(); // 도구 전환 진동 피드백
           if (!isSelected) {
             widget.onToolChanged(DrawingTool.eraser);
           }
           _showEraserPanel(context);
         },
-        child: Container(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? highlightColor.withOpacity(0.1) : null,
+            color: isSelected ? highlightColor.withValues(alpha: 0.15 ) : null,
             borderRadius: BorderRadius.circular(6),
-            border: isSelected ? Border.all(color: highlightColor, width: 1.5) : null,
+            border: isSelected ? Border.all(color: highlightColor, width: 2) : null,
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -1177,7 +1096,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         currentTool: widget.currentTool,
         onToolChanged: widget.onToolChanged,
       ),
-    ));
+    ),);
   }
 
   /// 영역 지우개 도구 버튼
@@ -1193,7 +1112,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.red.withOpacity(0.1) : null,
+            color: isSelected ? Colors.red.withValues(alpha: 0.1 ) : null,
             borderRadius: BorderRadius.circular(6),
             border: isSelected ? Border.all(color: Colors.red, width: 1.5) : null,
           ),
@@ -1243,7 +1162,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.blue.withOpacity(0.1) : null,
+            color: isSelected ? Colors.blue.withValues(alpha: 0.1 ) : null,
             borderRadius: BorderRadius.circular(6),
             border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
           ),
@@ -1320,9 +1239,11 @@ class _QuickToolbarState extends State<QuickToolbar> {
       message: tooltip ?? '',
       child: InkWell(
         onTap: enabled ? onPressed : null,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(8),
         child: Container(
-          padding: const EdgeInsets.all(6),
+          width: 48, // WCAG 권장 터치 타겟 크기
+          height: 48,
+          alignment: Alignment.center,
           child: Icon(
             icon,
             size: 20,
@@ -1338,19 +1259,31 @@ class _QuickToolbarState extends State<QuickToolbar> {
     return Tooltip(
       message: tooltip,
       child: InkWell(
-        onTap: () => widget.onToolChanged(tool),
-        borderRadius: BorderRadius.circular(6),
-        child: Container(
-          padding: const EdgeInsets.all(6),
+        onTap: () {
+          HapticFeedback.selectionClick(); // 도구 전환 진동 피드백
+          widget.onToolChanged(tool);
+        },
+        borderRadius: BorderRadius.circular(8),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
+          width: 48, // WCAG 권장 터치 타겟 크기
+          height: 48,
+          alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: isSelected ? Colors.blue.withOpacity(0.1) : null,
-            borderRadius: BorderRadius.circular(6),
-            border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
+            color: isSelected ? Colors.blue.withValues(alpha: 0.15 ) : null,
+            borderRadius: BorderRadius.circular(8),
+            border: isSelected ? Border.all(color: Colors.blue, width: 2) : null,
           ),
-          child: Icon(
-            icon,
-            size: 20,
-            color: isSelected ? Colors.blue : Colors.grey[700],
+          child: AnimatedScale(
+            scale: isSelected ? 1.1 : 1.0,
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOutCubic,
+            child: Icon(
+              icon,
+              size: 20,
+              color: isSelected ? Colors.blue : Colors.grey[700],
+            ),
           ),
         ),
       ),
@@ -1475,13 +1408,16 @@ class _QuickToolbarState extends State<QuickToolbar> {
         },
         child: Container(
           key: buttonKey,
-          padding: const EdgeInsets.all(6),
+          width: 48, // WCAG 권장 터치 타겟 크기
+          height: 48,
+          alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: isSelected ? Colors.blue.withOpacity(0.1) : null,
-            borderRadius: BorderRadius.circular(6),
+            color: isSelected ? Colors.blue.withValues(alpha: 0.1 ) : null,
+            borderRadius: BorderRadius.circular(8),
             border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
           ),
           child: Stack(
+            alignment: Alignment.center,
             children: [
               Icon(
                 Icons.highlight_alt,
@@ -1490,8 +1426,8 @@ class _QuickToolbarState extends State<QuickToolbar> {
               ),
               // Color indicator dot
               Positioned(
-                right: -2,
-                bottom: -2,
+                right: 10,
+                bottom: 10,
                 child: Container(
                   width: 8,
                   height: 8,
@@ -1542,14 +1478,16 @@ class _QuickToolbarState extends State<QuickToolbar> {
           _showPresentationHighlighterSpeedPanel(context);
         },
         child: Container(
-          padding: const EdgeInsets.all(6),
+          width: 48, // WCAG 권장 터치 타겟 크기
+          height: 48,
+          alignment: Alignment.center,
           decoration: BoxDecoration(
             // 선택 여부와 관계없이 ON/OFF 상태 표시
             // ON일 때 밝은 노란색 배경, OFF일 때 회색 배경
             color: widget.presentationHighlighterFadeEnabled
-                ? Colors.amber.withOpacity(isSelected ? 0.25 : 0.1)
-                : Colors.grey.withOpacity(isSelected ? 0.2 : 0.1),
-            borderRadius: BorderRadius.circular(6),
+                ? Colors.amber.withValues(alpha: (isSelected ? 0.25 : 0.1) )
+                : Colors.grey.withValues(alpha: (isSelected ? 0.2 : 0.1) ),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(
               color: isSelected
                   ? (widget.presentationHighlighterFadeEnabled
@@ -1662,7 +1600,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: isSelected ? Colors.amber.withOpacity(0.3) : Colors.grey.withOpacity(0.1),
+          color: isSelected ? Colors.amber.withValues(alpha: 0.3 ) : Colors.grey.withValues(alpha: 0.1 ),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: isSelected ? Colors.amber[700]! : Colors.grey[300]!,
@@ -1685,7 +1623,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
     final isSelected = widget.currentColor.value == color.value;
     // For highlighter, compare with opacity
     final isHighlighterColor = widget.currentTool == DrawingTool.highlighter &&
-        widget.currentColor.withOpacity(1.0).value == color.value;
+        widget.currentColor.withValues(alpha: 1.0 ).value == color.value;
     final selected = isSelected || isHighlighterColor;
 
     return Tooltip(
@@ -1727,7 +1665,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
           margin: const EdgeInsets.symmetric(horizontal: 2),
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.blue.withOpacity(0.1) : null,
+            color: isSelected ? Colors.blue.withValues(alpha: 0.1 ) : null,
             borderRadius: BorderRadius.circular(6),
             border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
           ),
@@ -1760,7 +1698,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
           margin: const EdgeInsets.symmetric(horizontal: 2),
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.orange.withOpacity(0.1) : null,
+            color: isSelected ? Colors.orange.withValues(alpha: 0.1 ) : null,
             borderRadius: BorderRadius.circular(6),
             border: isSelected ? Border.all(color: Colors.orange, width: 1.5) : null,
           ),
@@ -1794,7 +1732,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.blue.withOpacity(0.1),
+            color: Colors.blue.withValues(alpha: 0.1 ),
             borderRadius: BorderRadius.circular(6),
           ),
           child: Row(
@@ -1808,7 +1746,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
                 child: Container(
                   width: widget.currentWidth.clamp(2.0, 12.0),
                   height: widget.currentWidth.clamp(2.0, 12.0),
-                  decoration: BoxDecoration(
+                  decoration: const BoxDecoration(
                     color: Colors.blue,
                     shape: BoxShape.circle,
                   ),
@@ -1897,7 +1835,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               decoration: BoxDecoration(
-                color: Colors.amber.withOpacity(0.15),
+                color: Colors.amber.withValues(alpha: 0.15 ),
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Row(
@@ -1908,7 +1846,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
                     width: 16,
                     height: 12,
                     decoration: BoxDecoration(
-                      color: widget.currentColor.withOpacity(widget.highlighterOpacity),
+                      color: widget.currentColor.withValues(alpha: widget.highlighterOpacity ),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
@@ -1950,7 +1888,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
                         width: 24,
                         height: (width / 3).clamp(6.0, 16.0),
                         decoration: BoxDecoration(
-                          color: widget.currentColor.withOpacity(widget.highlighterOpacity),
+                          color: widget.currentColor.withValues(alpha: widget.highlighterOpacity ),
                           borderRadius: BorderRadius.circular(2),
                           border: Border.all(
                             color: isSelected ? Colors.amber[700]! : Colors.grey[300]!,
@@ -1995,9 +1933,9 @@ class _QuickToolbarState extends State<QuickToolbar> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.amber.withOpacity(0.1),
+            color: Colors.amber.withValues(alpha: 0.1 ),
             borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: Colors.amber.withOpacity(0.3)),
+            border: Border.all(color: Colors.amber.withValues(alpha: 0.3 )),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -2041,7 +1979,7 @@ class _QuickToolbarState extends State<QuickToolbar> {
                     width: 24,
                     height: 12,
                     decoration: BoxDecoration(
-                      color: widget.currentColor.withOpacity(opacity),
+                      color: widget.currentColor.withValues(alpha: opacity ),
                       borderRadius: BorderRadius.circular(2),
                       border: Border.all(
                         color: isSelected ? Colors.amber[700]! : Colors.grey[300]!,
@@ -2118,12 +2056,20 @@ class _PenPanelOverlay extends StatefulWidget {
 class _PenPanelOverlayState extends State<_PenPanelOverlay> {
   late Color _localColor;
   late double _localWidth;
+  List<Color> _recentColors = [];
 
   @override
   void initState() {
     super.initState();
     _localColor = widget.currentColor;
     _localWidth = widget.currentWidth;
+    _loadRecentColors();
+  }
+
+  void _loadRecentColors() {
+    setState(() {
+      _recentColors = SettingsService.instance.recentColors;
+    });
   }
 
   String _formatWidth(double width) {
@@ -2152,7 +2098,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 색상 섹션 (2줄 레이아웃)
+              // 색상 섹션 (최근 색상 + 프리셋 색상)
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -2165,6 +2111,50 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                     ),
                   ),
                   const SizedBox(height: 6),
+                  // 최근 사용 색상 (있을 경우)
+                  if (_recentColors.isNotEmpty) ...[
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.history, size: 12, color: Colors.grey[500]),
+                        const SizedBox(width: 4),
+                        Text(
+                          '최근',
+                          style: TextStyle(fontSize: 9, color: Colors.grey[500]),
+                        ),
+                        const SizedBox(width: 4),
+                        ..._recentColors.take(5).map((color) {
+                          final isThisColorSelected = _localColor.value == color.value;
+                          return Listener(
+                            behavior: HitTestBehavior.opaque,
+                            onPointerUp: (_) {
+                              setState(() => _localColor = color);
+                              widget.onColorChanged(color);
+                            },
+                            child: Container(
+                              width: 22,
+                              height: 22,
+                              margin: const EdgeInsets.all(1),
+                              decoration: BoxDecoration(
+                                color: color,
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                  color: isThisColorSelected ? Colors.blue : Colors.grey[300]!,
+                                  width: isThisColorSelected ? 2 : 1,
+                                ),
+                              ),
+                              child: isThisColorSelected
+                                  ? Icon(Icons.check, size: 12, color: color.computeLuminance() > 0.5 ? Colors.black : Colors.white)
+                                  : null,
+                            ),
+                          );
+                        }),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Container(height: 1, width: 145, color: Colors.grey[200]),
+                    const SizedBox(height: 4),
+                  ],
                   // 1열 (5개)
                   Row(
                     mainAxisSize: MainAxisSize.min,
@@ -2264,7 +2254,7 @@ class _PenPanelOverlayState extends State<_PenPanelOverlay> {
                             height: 28,
                             margin: const EdgeInsets.symmetric(horizontal: 2),
                             decoration: BoxDecoration(
-                              color: isThisWidthSelected ? Colors.blue[700]!.withOpacity(0.1) : null,
+                              color: isThisWidthSelected ? Colors.blue[700]!.withValues(alpha: 0.1 ) : null,
                               borderRadius: BorderRadius.circular(6),
                               border: Border.all(
                                 color: isThisWidthSelected ? Colors.blue[700]! : Colors.grey[300]!,
@@ -2390,7 +2380,7 @@ class _HighlighterPanelOverlayState extends State<_HighlighterPanelOverlay> {
                           height: 26,
                           margin: const EdgeInsets.all(1.5),
                           decoration: BoxDecoration(
-                            color: color.withOpacity(0.7),
+                            color: color.withValues(alpha: 0.7 ),
                             borderRadius: BorderRadius.circular(6),
                             border: Border.all(
                               color: isThisColorSelected ? Colors.amber[700]! : Colors.grey[300]!,
@@ -2420,7 +2410,7 @@ class _HighlighterPanelOverlayState extends State<_HighlighterPanelOverlay> {
                           height: 26,
                           margin: const EdgeInsets.all(1.5),
                           decoration: BoxDecoration(
-                            color: color.withOpacity(0.7),
+                            color: color.withValues(alpha: 0.7 ),
                             borderRadius: BorderRadius.circular(6),
                             border: Border.all(
                               color: isThisColorSelected ? Colors.amber[700]! : Colors.grey[300]!,
@@ -2473,7 +2463,7 @@ class _HighlighterPanelOverlayState extends State<_HighlighterPanelOverlay> {
                             height: 28,
                             margin: const EdgeInsets.symmetric(horizontal: 2),
                             decoration: BoxDecoration(
-                              color: isThisWidthSelected ? Colors.amber.withOpacity(0.2) : null,
+                              color: isThisWidthSelected ? Colors.amber.withValues(alpha: 0.2 ) : null,
                               borderRadius: BorderRadius.circular(6),
                               border: Border.all(
                                 color: isThisWidthSelected ? Colors.amber[700]! : Colors.grey[300]!,
@@ -2534,7 +2524,7 @@ class _HighlighterPanelOverlayState extends State<_HighlighterPanelOverlay> {
                             height: 28,
                             margin: const EdgeInsets.symmetric(horizontal: 2),
                             decoration: BoxDecoration(
-                              color: isThisOpacitySelected ? Colors.amber.withOpacity(0.2) : null,
+                              color: isThisOpacitySelected ? Colors.amber.withValues(alpha: 0.2 ) : null,
                               borderRadius: BorderRadius.circular(6),
                               border: Border.all(
                                 color: isThisOpacitySelected ? Colors.amber[700]! : Colors.grey[300]!,
@@ -2634,7 +2624,7 @@ class _EraserPanelOverlayState extends State<_EraserPanelOverlay> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
-                        color: isEraserSelected ? Colors.orange.withOpacity(0.2) : null,
+                        color: isEraserSelected ? Colors.orange.withValues(alpha: 0.2 ) : null,
                         borderRadius: BorderRadius.circular(6),
                         border: Border.all(
                           color: isEraserSelected ? Colors.orange : Colors.grey[300]!,
@@ -2673,7 +2663,7 @@ class _EraserPanelOverlayState extends State<_EraserPanelOverlay> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
-                        color: isAreaEraserSelected ? Colors.red.withOpacity(0.2) : null,
+                        color: isAreaEraserSelected ? Colors.red.withValues(alpha: 0.2 ) : null,
                         borderRadius: BorderRadius.circular(6),
                         border: Border.all(
                           color: isAreaEraserSelected ? Colors.red : Colors.grey[300]!,
@@ -2732,7 +2722,7 @@ class _EraserPanelOverlayState extends State<_EraserPanelOverlay> {
                           height: 28,
                           margin: const EdgeInsets.symmetric(horizontal: 3),
                           decoration: BoxDecoration(
-                            color: isThisWidthSelected ? Colors.orange.withOpacity(0.2) : null,
+                            color: isThisWidthSelected ? Colors.orange.withValues(alpha: 0.2 ) : null,
                             borderRadius: BorderRadius.circular(6),
                             border: Border.all(
                               color: isThisWidthSelected ? Colors.orange : Colors.grey[300]!,

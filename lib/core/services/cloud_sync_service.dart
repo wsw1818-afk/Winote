@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -13,6 +14,13 @@ enum SyncStatus {
   offline,    // 오프라인
 }
 
+/// 파일 변경 이벤트 타입
+enum FileChangeType {
+  created,
+  modified,
+  deleted,
+}
+
 /// 클라우드 제공자 종류
 enum CloudProvider {
   none,       // 동기화 비활성화
@@ -22,6 +30,9 @@ enum CloudProvider {
 
 /// 동기화 이벤트 리스너
 typedef SyncStatusListener = void Function(SyncStatus status, String? message);
+
+/// 파일 변경 이벤트 리스너
+typedef FileChangeListener = void Function(String noteId, FileChangeType type);
 
 /// 클라우드 동기화 서비스
 /// OneDrive 또는 로컬 폴더로 노트를 동기화합니다.
@@ -41,12 +52,22 @@ class CloudSyncService {
   DateTime? _lastSyncTime;
   final List<SyncStatusListener> _listeners = [];
 
+  // 실시간 동기화 관련
+  bool _realtimeSyncEnabled = false;
+  bool _fileWatchEnabled = false;
+  StreamSubscription<FileSystemEvent>? _fileWatcher;
+  final List<FileChangeListener> _fileChangeListeners = [];
+  Timer? _debounceTimer;
+  final Set<String> _pendingChanges = {}; // 처리 대기 중인 파일 변경
+
   // Getters
   SyncStatus get status => _status;
   CloudProvider get provider => _provider;
   String? get syncPath => _syncPath;
   DateTime? get lastSyncTime => _lastSyncTime;
   bool get isEnabled => _provider != CloudProvider.none && _syncPath != null;
+  bool get isRealtimeSyncEnabled => _realtimeSyncEnabled;
+  bool get isFileWatchEnabled => _fileWatchEnabled;
 
   /// 상태 변경 리스너 등록
   void addStatusListener(SyncStatusListener listener) {
@@ -56,6 +77,23 @@ class CloudSyncService {
   /// 상태 변경 리스너 제거
   void removeStatusListener(SyncStatusListener listener) {
     _listeners.remove(listener);
+  }
+
+  /// 파일 변경 리스너 등록
+  void addFileChangeListener(FileChangeListener listener) {
+    _fileChangeListeners.add(listener);
+  }
+
+  /// 파일 변경 리스너 제거
+  void removeFileChangeListener(FileChangeListener listener) {
+    _fileChangeListeners.remove(listener);
+  }
+
+  /// 파일 변경 알림
+  void _notifyFileChange(String noteId, FileChangeType type) {
+    for (final listener in _fileChangeListeners) {
+      listener(noteId, type);
+    }
   }
 
   /// 상태 변경 알림
@@ -82,8 +120,15 @@ class CloudSyncService {
         _lastSyncTime = config['lastSyncTime'] != null
             ? DateTime.parse(config['lastSyncTime'] as String)
             : null;
+        _realtimeSyncEnabled = config['realtimeSync'] as bool? ?? false;
+        _fileWatchEnabled = config['fileWatch'] as bool? ?? false;
 
-        debugPrint('[CloudSync] Loaded config: provider=$_provider, path=$_syncPath');
+        debugPrint('[CloudSync] Loaded config: provider=$_provider, path=$_syncPath, realtime=$_realtimeSyncEnabled, watch=$_fileWatchEnabled');
+
+        // 파일 감시가 활성화되어 있으면 시작
+        if (_fileWatchEnabled && _syncPath != null) {
+          _startFileWatcher();
+        }
       } catch (e) {
         debugPrint('[CloudSync] Error loading config: $e');
       }
@@ -105,6 +150,8 @@ class CloudSyncService {
       'provider': _provider.index,
       'syncPath': _syncPath,
       'lastSyncTime': _lastSyncTime?.toIso8601String(),
+      'realtimeSync': _realtimeSyncEnabled,
+      'fileWatch': _fileWatchEnabled,
     };
 
     await configFile.writeAsString(jsonEncode(config));
@@ -138,10 +185,141 @@ class CloudSyncService {
 
   /// 동기화 비활성화
   Future<void> disableSync() async {
+    _stopFileWatcher();
     _provider = CloudProvider.none;
     _syncPath = null;
+    _realtimeSyncEnabled = false;
+    _fileWatchEnabled = false;
     await _saveConfig();
     _notifyStatus(SyncStatus.idle, '동기화 비활성화됨');
+  }
+
+  /// 실시간 동기화 설정 (노트 저장 시 즉시 업로드)
+  Future<void> setRealtimeSync(bool enabled) async {
+    _realtimeSyncEnabled = enabled;
+    await _saveConfig();
+    debugPrint('[CloudSync] Realtime sync: $enabled');
+  }
+
+  /// 파일 감시 설정 (OneDrive 폴더 변경 감지)
+  Future<void> setFileWatch(bool enabled) async {
+    _fileWatchEnabled = enabled;
+    if (enabled && _syncPath != null) {
+      _startFileWatcher();
+    } else {
+      _stopFileWatcher();
+    }
+    await _saveConfig();
+    debugPrint('[CloudSync] File watch: $enabled');
+  }
+
+  /// 파일 감시 시작
+  void _startFileWatcher() {
+    _stopFileWatcher(); // 기존 감시 중지
+
+    if (_syncPath == null) return;
+
+    final syncDir = Directory(_syncPath!);
+    if (!syncDir.existsSync()) return;
+
+    debugPrint('[CloudSync] Starting file watcher on: $_syncPath');
+
+    _fileWatcher = syncDir.watch(events: FileSystemEvent.all).listen(
+      (event) {
+        // .winote 파일만 처리
+        if (!event.path.endsWith('.winote')) return;
+
+        final fileName = event.path.split(Platform.pathSeparator).last;
+        final noteId = fileName.replaceAll('.winote', '');
+
+        debugPrint('[CloudSync] File event: ${event.type} - $fileName');
+
+        // 디바운스: 짧은 시간 내 여러 이벤트를 하나로 묶음
+        _pendingChanges.add(noteId);
+        _debounceTimer?.cancel();
+        _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+          _processPendingChanges();
+        });
+      },
+      onError: (error) {
+        debugPrint('[CloudSync] File watcher error: $error');
+      },
+    );
+  }
+
+  /// 파일 감시 중지
+  void _stopFileWatcher() {
+    _fileWatcher?.cancel();
+    _fileWatcher = null;
+    _debounceTimer?.cancel();
+    _debounceTimer = null;
+    _pendingChanges.clear();
+    debugPrint('[CloudSync] File watcher stopped');
+  }
+
+  /// 대기 중인 파일 변경 처리
+  Future<void> _processPendingChanges() async {
+    if (_pendingChanges.isEmpty) return;
+
+    final changes = Set<String>.from(_pendingChanges);
+    _pendingChanges.clear();
+
+    debugPrint('[CloudSync] Processing ${changes.length} pending changes');
+
+    for (final noteId in changes) {
+      final filePath = '$_syncPath${Platform.pathSeparator}$noteId.winote';
+      final file = File(filePath);
+
+      if (await file.exists()) {
+        // 파일이 존재하면 다운로드 (생성 또는 수정)
+        try {
+          final jsonString = await file.readAsString();
+          final remoteNote = Note.fromJson(jsonDecode(jsonString) as Map<String, dynamic>);
+
+          // 로컬 노트와 비교
+          final storageService = NoteStorageService.instance;
+          final localNote = await storageService.loadNote(noteId);
+
+          if (localNote == null || remoteNote.modifiedAt.isAfter(localNote.modifiedAt)) {
+            // 원격이 더 최신이면 다운로드
+            await storageService.saveNote(remoteNote);
+            _notifyFileChange(noteId, FileChangeType.modified);
+            debugPrint('[CloudSync] Downloaded: ${remoteNote.title}');
+          }
+        } catch (e) {
+          debugPrint('[CloudSync] Error processing change for $noteId: $e');
+        }
+      } else {
+        // 파일이 삭제됨
+        _notifyFileChange(noteId, FileChangeType.deleted);
+        debugPrint('[CloudSync] Remote file deleted: $noteId');
+      }
+    }
+  }
+
+  /// 노트 즉시 업로드 (실시간 동기화용)
+  Future<bool> uploadNoteImmediately(Note note) async {
+    if (!isEnabled || !_realtimeSyncEnabled) return false;
+
+    try {
+      _notifyStatus(SyncStatus.syncing, '업로드 중...');
+      await _uploadNote(note);
+      _lastSyncTime = DateTime.now();
+      await _saveConfig();
+      _notifyStatus(SyncStatus.success, '업로드 완료: ${note.title}');
+      return true;
+    } catch (e) {
+      debugPrint('[CloudSync] Immediate upload error: $e');
+      _notifyStatus(SyncStatus.error, '업로드 실패: $e');
+      return false;
+    }
+  }
+
+  /// 서비스 정리 (앱 종료 시)
+  void dispose() {
+    _stopFileWatcher();
+    _listeners.clear();
+    _fileChangeListeners.clear();
   }
 
   /// 전체 동기화 수행

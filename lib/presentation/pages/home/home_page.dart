@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/note_storage_service.dart';
 import '../../../core/services/pdf_import_service.dart';
+import '../../../core/services/feedback_service.dart';
 import '../../../domain/entities/stroke.dart';
 
 class HomePage extends ConsumerStatefulWidget {
@@ -66,6 +67,14 @@ class _HomePageState extends ConsumerState<HomePage> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          // 문서 스캔 버튼
+          FloatingActionButton.small(
+            heroTag: 'scanDoc',
+            onPressed: () => context.push('/scanner'),
+            tooltip: '문서 스캔',
+            child: const Icon(Icons.document_scanner),
+          ),
+          const SizedBox(height: 8),
           // PDF 가져오기 버튼
           FloatingActionButton.small(
             heroTag: 'importPdf',
@@ -181,7 +190,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                   '펜이 주인공인 필기 앱',
                   style: TextStyle(
                     fontSize: 14,
-                    color: Colors.white.withOpacity(0.9),
+                    color: Colors.white.withValues(alpha: 0.9 ),
                   ),
                 ),
               ],
@@ -354,7 +363,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
-                    color: Colors.blue.withOpacity(0.1),
+                    color: Colors.blue.withValues(alpha: 0.1 ),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
@@ -422,18 +431,14 @@ class _HomePageState extends ConsumerState<HomePage> {
       } else {
         // 오류 메시지
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('PDF 가져오기에 실패했습니다')),
-          );
+          FeedbackService.instance.showError(context, 'PDF 가져오기에 실패했습니다');
         }
       }
     } catch (e) {
       debugPrint('PDF 가져오기 오류: $e');
       if (mounted) {
         Navigator.pop(context); // 로딩 닫기
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('오류: $e')),
-        );
+        FeedbackService.instance.showError(context, '오류: $e');
       }
     }
   }

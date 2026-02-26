@@ -138,7 +138,7 @@ class PdfImportService {
       final pagePattern = RegExp(r'/Type\s*/Page[^s]');
       final matches = pagePattern.allMatches(content);
 
-      return matches.length > 0 ? matches.length : 1;
+      return matches.isNotEmpty ? matches.length : 1;
     } catch (e) {
       debugPrint('[PdfImportService] Error getting page count: $e');
       return 1;
@@ -188,7 +188,7 @@ class PdfImportService {
               height: 1131,
             ),
           ],
-        ));
+        ),);
       }
 
       final note = Note(
@@ -204,6 +204,21 @@ class PdfImportService {
     } catch (e) {
       debugPrint('[PdfImportService] Error: $e');
       return null;
+    }
+  }
+
+  /// 특정 노트의 PDF 캐시 파일 삭제
+  Future<void> deletePdfForNote(String noteId) async {
+    try {
+      final cacheDir = await pdfCacheDirectory;
+      final pdfFile = File('$cacheDir${Platform.pathSeparator}$noteId.pdf');
+
+      if (await pdfFile.exists()) {
+        await pdfFile.delete();
+        debugPrint('[PdfImportService] PDF cache deleted for note: $noteId');
+      }
+    } catch (e) {
+      debugPrint('[PdfImportService] Error deleting PDF for note $noteId: $e');
     }
   }
 

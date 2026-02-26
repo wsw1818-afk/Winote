@@ -1,0 +1,42 @@
+{
+  "args": {
+    "model": "assets/models/lcnet050_p_multi_decoder_l3_d64_256_fp32.onnx",
+    "data": "tools/training/dataset",
+    "output": "tools/training/checkpoints",
+    "epochs": 10,
+    "batch_size": 32,
+    "lr": 1e-05,
+    "weight_decay": 1e-05,
+    "stage": 2,
+    "resume": "tools/training/checkpoints/checkpoint_best.pt",
+    "export_onnx": false
+  },
+  "elapsed_seconds": 4193.012002706528,
+  "best_val_dist": 2.5586576219142603,
+  "test_metrics": {
+    "loss": 0.16464425161480903,
+    "pts_loss": 3.3055539628549014e-05,
+    "avg_corner_dist_px": 2.557125761887226,
+    "success_rate_10px": 1.0
+  },
+  "history": [
+    {
+      "epoch": 5,
+      "train_loss": 0.16653901045396924,
+      "train_pts": 3.088764506173902e-05,
+      "val_loss": 0.16464437943696975,
+      "val_dist": 2.6342829475820935,
+      "val_success": 1.0,
+      "lr": 5.050000000000001e-06
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.166535849660635,
+      "train_pts": 2.781481819923215e-05,
+      "val_loss": 0.16464209225773813,
+      "val_dist": 2.5586576219142603,
+      "val_success": 1.0,
+      "lr": 1.0000000000000001e-07
+    }
+  ]
+}

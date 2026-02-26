@@ -28,17 +28,29 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   // Gesture settings
   String _twoFingerGestureMode = 'zoom'; // 'zoom' or 'scroll'
   bool _palmRejectionEnabled = true;
+  int _palmRejectionGracePeriod = 1000; // 밀리초
   bool _touchDrawingEnabled = false;
   // Shape snap settings
   bool _shapeSnapEnabled = true;
   double _shapeSnapAngle = 15.0;
-  // Shape recognition (직선/원 자동 인식)
-  bool _shapeRecognitionEnabled = false;
+  // 필압 민감도
+  double _pressureSensitivity = 0.6;
+  // 3손가락 제스처
+  bool _threeFingerGestureEnabled = true;
+  // S펜 호버 커서
+  bool _penHoverCursorEnabled = true;
+
+  // UI/UX 모드
+  bool _fullscreenModeEnabled = false;
+  bool _darkCanvasModeEnabled = false;
+  bool _leftHandedModeEnabled = false;
 
   // Cloud sync settings
   final CloudSyncService _cloudSync = CloudSyncService.instance;
   bool _isSyncing = false;
   bool _autoSyncEnabled = false;
+  bool _realtimeSyncEnabled = false;
+  bool _fileWatchEnabled = false;
 
   @override
   void initState() {
@@ -49,7 +61,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   Future<void> _initCloudSync() async {
     await _cloudSync.initialize();
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {
+        _realtimeSyncEnabled = _cloudSync.isRealtimeSyncEnabled;
+        _fileWatchEnabled = _cloudSync.isFileWatchEnabled;
+      });
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -62,11 +79,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _showDebugOverlay = settings.showDebugOverlay;
       _twoFingerGestureMode = settings.twoFingerGestureMode;
       _palmRejectionEnabled = settings.palmRejectionEnabled;
+      _palmRejectionGracePeriod = settings.palmRejectionGracePeriod;
       _touchDrawingEnabled = settings.touchDrawingEnabled;
       _shapeSnapEnabled = settings.shapeSnapEnabled;
       _shapeSnapAngle = settings.shapeSnapAngle;
-      _shapeRecognitionEnabled = settings.shapeRecognitionEnabled;
+      _pressureSensitivity = settings.pressureSensitivity;
+      _threeFingerGestureEnabled = settings.threeFingerGestureEnabled;
+      _penHoverCursorEnabled = settings.penHoverCursorEnabled;
       _autoSyncEnabled = settings.autoSyncEnabled;
+      // UI/UX 모드
+      _fullscreenModeEnabled = settings.fullscreenModeEnabled;
+      _darkCanvasModeEnabled = settings.darkCanvasModeEnabled;
+      _leftHandedModeEnabled = settings.leftHandedModeEnabled;
     });
   }
 
@@ -76,6 +100,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (template.toString().contains('grid')) return '격자 노트';
     if (template.toString().contains('dotted')) return '점 노트';
     return '빈 페이지';
+  }
+
+  String _getPressureSensitivityLabel(double sensitivity) {
+    if (sensitivity <= 0.4) return '부드러움 (가벼운 터치)';
+    if (sensitivity <= 0.5) return '약간 부드러움';
+    if (sensitivity <= 0.6) return '보통';
+    if (sensitivity <= 0.7) return '약간 강함';
+    if (sensitivity <= 0.8) return '강함';
+    return '매우 강함 (힘줘야 굵어짐)';
+  }
+
+  String _getPalmRejectionGracePeriodLabel(int ms) {
+    if (ms <= 500) return '짧게 (${ms}ms)';
+    if (ms <= 1000) return '보통 (${ms}ms)';
+    if (ms <= 1500) return '길게 (${ms}ms)';
+    return '매우 길게 (${ms}ms)';
   }
 
   @override
@@ -140,6 +180,26 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               await SettingsService.instance.setPalmRejectionEnabled(value);
             },
           ),
+          if (_palmRejectionEnabled)
+            ListTile(
+              leading: const Icon(Icons.timer),
+              title: const Text('터치 무시 시간'),
+              subtitle: Text(_getPalmRejectionGracePeriodLabel(_palmRejectionGracePeriod)),
+              trailing: SizedBox(
+                width: 180,
+                child: Slider(
+                  value: _palmRejectionGracePeriod.toDouble(),
+                  min: 200,
+                  max: 3000,
+                  divisions: 14,
+                  label: '${_palmRejectionGracePeriod}ms',
+                  onChanged: (value) async {
+                    setState(() => _palmRejectionGracePeriod = value.toInt());
+                    await SettingsService.instance.setPalmRejectionGracePeriod(value.toInt());
+                  },
+                ),
+              ),
+            ),
           SwitchListTile(
             secondary: const Icon(Icons.fingerprint),
             title: const Text('손으로 그리기'),
@@ -149,6 +209,50 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               setState(() => _touchDrawingEnabled = value);
               await SettingsService.instance.setTouchDrawingEnabled(value);
             },
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.swipe),
+            title: const Text('3손가락 제스처'),
+            subtitle: const Text('3손가락 탭=다시실행, 스와이프=실행취소/다시실행'),
+            value: _threeFingerGestureEnabled,
+            onChanged: (value) async {
+              setState(() => _threeFingerGestureEnabled = value);
+              await SettingsService.instance.setThreeFingerGestureEnabled(value);
+            },
+          ),
+
+          const Divider(),
+
+          // 펜 설정 섹션
+          _buildSectionHeader('펜 설정'),
+          SwitchListTile(
+            secondary: const Icon(Icons.mouse),
+            title: const Text('호버 커서 표시'),
+            subtitle: const Text('S펜을 화면에 가까이 대면 커서 미리보기'),
+            value: _penHoverCursorEnabled,
+            onChanged: (value) async {
+              setState(() => _penHoverCursorEnabled = value);
+              await SettingsService.instance.setPenHoverCursorEnabled(value);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.speed),
+            title: const Text('필압 민감도'),
+            subtitle: Text(_getPressureSensitivityLabel(_pressureSensitivity)),
+            trailing: SizedBox(
+              width: 180,
+              child: Slider(
+                value: _pressureSensitivity,
+                min: 0.3,
+                max: 1.0,
+                divisions: 7,
+                label: _getPressureSensitivityLabel(_pressureSensitivity),
+                onChanged: (value) async {
+                  setState(() => _pressureSensitivity = value);
+                  await SettingsService.instance.setPressureSensitivity(value);
+                },
+              ),
+            ),
           ),
 
           const Divider(),
@@ -185,17 +289,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
             ),
-          SwitchListTile(
-            secondary: const Icon(Icons.auto_fix_high),
-            title: const Text('도형 자동 인식'),
-            subtitle: const Text('직선/원을 그리면 자동으로 교정'),
-            value: _shapeRecognitionEnabled,
-            onChanged: (value) async {
-              setState(() => _shapeRecognitionEnabled = value);
-              await SettingsService.instance.setShapeRecognitionEnabled(value);
-            },
-          ),
-
           const Divider(),
 
           // Template Settings Section
@@ -215,7 +308,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           SwitchListTile(
             secondary: const Icon(Icons.save),
             title: const Text('자동 저장'),
-            subtitle: Text(_autoSaveEnabled ? '${_autoSaveDelay}초 후 자동 저장' : '꺼짐'),
+            subtitle: Text(_autoSaveEnabled ? '$_autoSaveDelay초 후 자동 저장' : '꺼짐'),
             value: _autoSaveEnabled,
             onChanged: (value) async {
               setState(() => _autoSaveEnabled = value);
@@ -251,6 +344,41 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
           const Divider(),
 
+          // UI/UX Settings Section
+          _buildSectionHeader('UI/UX'),
+          SwitchListTile(
+            secondary: const Icon(Icons.fullscreen),
+            title: const Text('풀스크린 모드'),
+            subtitle: const Text('도구바를 숨기고 캔버스만 표시'),
+            value: _fullscreenModeEnabled,
+            onChanged: (value) async {
+              setState(() => _fullscreenModeEnabled = value);
+              await SettingsService.instance.setFullscreenModeEnabled(value);
+            },
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.dark_mode),
+            title: const Text('다크 캔버스'),
+            subtitle: const Text('검은 배경에 밝은 라인 (야간 필기)'),
+            value: _darkCanvasModeEnabled,
+            onChanged: (value) async {
+              setState(() => _darkCanvasModeEnabled = value);
+              await SettingsService.instance.setDarkCanvasModeEnabled(value);
+            },
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.swap_horiz),
+            title: const Text('왼손잡이 모드'),
+            subtitle: const Text('도구바를 오른쪽에 배치'),
+            value: _leftHandedModeEnabled,
+            onChanged: (value) async {
+              setState(() => _leftHandedModeEnabled = value);
+              await SettingsService.instance.setLeftHandedModeEnabled(value);
+            },
+          ),
+
+          const Divider(),
+
           // Cloud Sync Section
           _buildSectionHeader('클라우드 동기화'),
           ListTile(
@@ -261,7 +389,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             title: const Text('동기화 상태'),
             subtitle: Text(_cloudSync.isEnabled
                 ? '${_cloudSync.provider == CloudProvider.oneDrive ? 'OneDrive' : '로컬 폴더'}와 동기화 중\n${_cloudSync.getStatusText()}'
-                : '동기화 비활성화'),
+                : '동기화 비활성화',),
             trailing: _isSyncing
                 ? const SizedBox(
                     width: 24,
@@ -276,7 +404,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             title: const Text('OneDrive 연결'),
             subtitle: Text(_cloudSync.provider == CloudProvider.oneDrive
                 ? _cloudSync.syncPath ?? '설정됨'
-                : '클릭하여 설정'),
+                : '클릭하여 설정',),
             trailing: const Icon(Icons.chevron_right),
             onTap: _setupOneDrive,
           ),
@@ -285,19 +413,29 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             title: const Text('로컬 폴더 동기화'),
             subtitle: Text(_cloudSync.provider == CloudProvider.local
                 ? _cloudSync.syncPath ?? '설정됨'
-                : '클릭하여 설정'),
+                : '클릭하여 설정',),
             trailing: const Icon(Icons.chevron_right),
             onTap: _setupLocalSync,
           ),
           if (_cloudSync.isEnabled) ...[
             SwitchListTile(
               secondary: const Icon(Icons.sync),
-              title: const Text('자동 동기화'),
-              subtitle: const Text('노트 저장 시 자동으로 클라우드에 업로드'),
-              value: _autoSyncEnabled,
+              title: const Text('실시간 동기화'),
+              subtitle: const Text('노트 저장 시 즉시 클라우드에 업로드'),
+              value: _realtimeSyncEnabled,
               onChanged: (value) async {
-                setState(() => _autoSyncEnabled = value);
-                await SettingsService.instance.setAutoSyncEnabled(value);
+                setState(() => _realtimeSyncEnabled = value);
+                await _cloudSync.setRealtimeSync(value);
+              },
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.visibility),
+              title: const Text('파일 감시'),
+              subtitle: const Text('클라우드 폴더 변경 감지 (자동 다운로드)'),
+              value: _fileWatchEnabled,
+              onChanged: (value) async {
+                setState(() => _fileWatchEnabled = value);
+                await _cloudSync.setFileWatch(value);
               },
             ),
             ListTile(
@@ -328,47 +466,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
           const Divider(),
 
-          // Backup Section
+          // Backup Section (통합)
           _buildSectionHeader('백업'),
           ListTile(
             leading: const Icon(Icons.backup),
             title: const Text('백업 만들기'),
             subtitle: const Text('모든 노트와 폴더를 백업'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: _createBackup,
+            onTap: _showBackupOptions,
           ),
           ListTile(
             leading: const Icon(Icons.restore),
             title: const Text('백업 복원'),
             subtitle: const Text('백업에서 노트 복원'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: _showBackupList,
-          ),
-          ListTile(
-            leading: const Icon(Icons.folder_special),
-            title: const Text('백업 폴더'),
-            subtitle: const Text('문서/Winote/backups'),
-            trailing: const Icon(Icons.folder_open),
-            onTap: _openBackupFolder,
-          ),
-
-          const Divider(),
-
-          // External Backup Section
-          _buildSectionHeader('외부 백업/공유'),
-          ListTile(
-            leading: const Icon(Icons.save_alt),
-            title: const Text('백업 내보내기'),
-            subtitle: const Text('원하는 위치에 백업 저장'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: _exportBackupToExternal,
-          ),
-          ListTile(
-            leading: const Icon(Icons.file_upload),
-            title: const Text('백업 가져오기'),
-            subtitle: const Text('외부 파일에서 복원'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: _importBackupFromExternal,
+            onTap: _showRestoreOptions,
           ),
           ListTile(
             leading: const Icon(Icons.note_add),
@@ -376,6 +488,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             subtitle: const Text('.wnote 파일 가져오기'),
             trailing: const Icon(Icons.chevron_right),
             onTap: _importNote,
+          ),
+          ListTile(
+            leading: const Icon(Icons.folder_special),
+            title: const Text('백업 폴더 열기'),
+            subtitle: const Text('문서/Winote/backups'),
+            trailing: const Icon(Icons.folder_open),
+            onTap: _openBackupFolder,
           ),
 
           const Divider(),
@@ -557,10 +676,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   boxShadow: isSelected
                       ? [
                           BoxShadow(
-                            color: color.withOpacity(0.5),
+                            color: color.withValues(alpha: 0.5),
                             blurRadius: 8,
                             spreadRadius: 2,
-                          )
+                          ),
                         ]
                       : null,
                 ),
@@ -647,6 +766,68 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final uri = Uri.file(dir);
     if (await canLaunchUrl(uri)) {
       await launchUrl(uri);
+    }
+  }
+
+  /// 백업 만들기 옵션 표시 (앱 내부 / 외부 폴더)
+  Future<void> _showBackupOptions() async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('백업 만들기'),
+        content: const Text('백업을 어디에 저장할까요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'cancel'),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'external'),
+            child: const Text('폴더 선택'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'internal'),
+            child: const Text('앱 내부'),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == 'internal') {
+      await _createBackup();
+    } else if (choice == 'external') {
+      await _exportBackupToExternal();
+    }
+  }
+
+  /// 백업 복원 옵션 표시 (앱 내부 / 외부 파일)
+  Future<void> _showRestoreOptions() async {
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('백업 복원'),
+        content: const Text('어디에서 백업을 불러올까요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'cancel'),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'external'),
+            child: const Text('파일 선택'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'internal'),
+            child: const Text('백업 목록'),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == 'internal') {
+      await _showBackupList();
+    } else if (choice == 'external') {
+      await _importBackupFromExternal();
     }
   }
 
@@ -820,6 +1001,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (confirm != true) return;
 
     // Show loading
+    final navigator = Navigator.of(context);
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -837,7 +1019,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final backupService = BackupService.instance;
     final result = await backupService.restoreBackup(backup.filePath);
 
-    if (mounted) Navigator.pop(context);
+    if (mounted) navigator.pop();
 
     debugPrint('복원 결과: ${result.message}');
   }
@@ -1039,6 +1221,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (oneDrivePath != null) {
       // 자동 감지 또는 직접 선택 옵션 제공
+      final navigator = Navigator.of(context);
       final choice = await showDialog<String>(
         context: context,
         builder: (context) => AlertDialog(
@@ -1084,7 +1267,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       if (choice == 'auto') {
         final success = await _cloudSync.setSyncFolder(oneDrivePath, CloudProvider.oneDrive);
         if (mounted) {
-          setState(() {});
+          setState(() {
+            _realtimeSyncEnabled = _cloudSync.isRealtimeSyncEnabled;
+            _fileWatchEnabled = _cloudSync.isFileWatchEnabled;
+          });
           if (success) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('OneDrive 연결 완료')),
@@ -1122,7 +1308,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (result != null) {
       final success = await _cloudSync.setSyncFolder(result, provider);
       if (mounted) {
-        setState(() {});
+        setState(() {
+          _realtimeSyncEnabled = _cloudSync.isRealtimeSyncEnabled;
+          _fileWatchEnabled = _cloudSync.isFileWatchEnabled;
+        });
         if (success) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(

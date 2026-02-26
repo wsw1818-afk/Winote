@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../domain/entities/stroke.dart';
 import '../../domain/entities/stroke_point.dart';
 import '../../domain/entities/canvas_shape.dart';
+import 'pdf_import_service.dart';
 
 /// Page model for multi-page notes
 class NotePage {
@@ -91,7 +92,7 @@ class NotePage {
         'pressure': p.pressure,
         'tilt': p.tilt,
         'timestamp': p.timestamp,
-      }).toList(),
+      },).toList(),
       'timestamp': stroke.timestamp,
       'isShape': stroke.isShape,
       'shapeType': stroke.shapeType.index,
@@ -328,7 +329,7 @@ class Note {
           clearOverlayTemplateIndex: clearOverlayTemplateIndex,
           templateIndex: templateIndex,
           clearTemplateIndex: clearTemplateIndex,
-        ));
+        ),);
         pageFound = true;
       } else {
         newPages.add(page);
@@ -342,7 +343,7 @@ class Note {
         backgroundImagePath: backgroundImagePath,
         overlayTemplateIndex: overlayTemplateIndex,
         templateIndex: templateIndex,
-      ));
+      ),);
       newPages.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
     }
 
@@ -353,11 +354,32 @@ class Note {
   }
 
   /// Add a new page
-  Note addPage() {
+  /// [fromPageNumber]를 지정하면 해당 페이지의 템플릿 설정을 복사합니다.
+  Note addPage({int? fromPageNumber}) {
     final maxPageNumber = pages.isEmpty
         ? -1
         : pages.map((p) => p.pageNumber).reduce((a, b) => a > b ? a : b);
-    final newPage = NotePage(pageNumber: maxPageNumber + 1, strokes: []);
+
+    // 템플릿 설정 복사 (fromPageNumber가 지정된 경우)
+    int? templateIndex;
+    int? overlayTemplateIndex;
+
+    if (fromPageNumber != null && pages.isNotEmpty) {
+      final sourcePage = pages.firstWhere(
+        (p) => p.pageNumber == fromPageNumber,
+        orElse: () => pages.first,
+      );
+      templateIndex = sourcePage.templateIndex;
+      overlayTemplateIndex = sourcePage.overlayTemplateIndex;
+      // 배경 이미지는 복사하지 않음 (개별 페이지 고유 설정)
+    }
+
+    final newPage = NotePage(
+      pageNumber: maxPageNumber + 1,
+      strokes: [],
+      templateIndex: templateIndex,
+      overlayTemplateIndex: overlayTemplateIndex,
+    );
 
     return copyWith(
       pages: [...pages, newPage],
@@ -439,7 +461,7 @@ class Note {
         timestamp: DateTime.now().millisecondsSinceEpoch,
         isShape: s.isShape,
         shapeType: s.shapeType,
-      )).toList(),
+      ),).toList(),
       shapes: sourcePage.shapes.toList(),
       backgroundImagePath: sourcePage.backgroundImagePath,
       templateIndex: sourcePage.templateIndex,
@@ -546,14 +568,20 @@ class NoteStorageService {
   }
 
   /// Save a note to file
-  Future<void> saveNote(Note note) async {
-    final dir = await notesDirectory;
-    final file = File('$dir${Platform.pathSeparator}${note.id}.json');
+  Future<bool> saveNote(Note note) async {
+    try {
+      final dir = await notesDirectory;
+      final file = File('$dir${Platform.pathSeparator}${note.id}.json');
 
-    final jsonString = jsonEncode(note.toJson());
-    await file.writeAsString(jsonString);
+      final jsonString = jsonEncode(note.toJson());
+      await file.writeAsString(jsonString);
 
-    debugPrint('[NoteStorageService] Note saved: ${note.id}');
+      debugPrint('[NoteStorageService] Note saved: ${note.id}');
+      return true;
+    } catch (e) {
+      debugPrint('[NoteStorageService] Error saving note ${note.id}: $e');
+      return false;
+    }
   }
 
   /// Load a note from file
@@ -587,6 +615,8 @@ class NoteStorageService {
 
       if (await file.exists()) {
         await file.delete();
+        // PDF 캐시 파일도 삭제 (PDF에서 가져온 노트인 경우)
+        await PdfImportService.instance.deletePdfForNote(noteId);
         debugPrint('[NoteStorageService] Note deleted: $noteId');
         return true;
       }
@@ -759,7 +789,7 @@ class NoteStorageService {
         folderId: folderId,
         clearFolder: folderId == null,
         modifiedAt: DateTime.now(),
-      ));
+      ),);
     }
   }
 

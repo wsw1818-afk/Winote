@@ -1,0 +1,15 @@
+# Claude Code 무시 폴더 (성능 최적화)
+node_modules/
+android/
+ios/
+.git/
+.expo/
+dist/
+build/
+.gradle/
+.kotlin/
+*.log
+*.map
+package-lock.json
+yarn.lock
+pnpm-lock.yaml

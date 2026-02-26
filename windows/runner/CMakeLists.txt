@@ -30,6 +30,10 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_BUILD=${FLUTT
 # Disable Windows macros that collide with C++ standard library functions.
 target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 
+# Disable C++/WinRT STA thread assertion check
+# This allows WinRT async calls from any thread without debug assertion failures
+target_compile_definitions(${BINARY_NAME} PRIVATE "WINRT_NO_MAKE_DETECTION")
+
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
